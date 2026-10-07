@@ -1,0 +1,97 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "小米运动健康 — Setup",
+        "data": {
+          "auth_method": "Authentication method",
+          "region": "Server region"
+        }
+      },
+      "password": {
+        "title": "小米运动健康 — Xiaomi Login",
+        "description": "Enter your Xiaomi account credentials. If Xiaomi asks for identity verification, the integration will try the SMS channel first (security phone), falling back to email.",
+        "data": {
+          "username": "Xiaomi account email or phone",
+          "password": "Password"
+        }
+      },
+      "captcha": {
+        "title": "小米运动健康 — Captcha Required",
+        "description": "Enter the text shown in the image:\n\n![Captcha](data:image/png;base64,{captcha_image})\n\nIf the image does not render, try opening: {captcha_url}",
+        "data": {
+          "captcha_code": "Captcha text"
+        }
+      },
+      "approval": {
+        "title": "小米运动健康 — Email Verification",
+        "description": "Xiaomi sent a verification code to your email (SMS channel was unavailable).\n\nEnter the code below — the integration will submit it automatically.",
+        "data": {
+          "email_code": "Code from email"
+        }
+      },
+      "sms_approval": {
+        "title": "小米运动健康 — SMS Verification",
+        "description": "A verification code was sent via SMS to your security phone ({phone}).\n\nEnter the 6-digit code below.",
+        "data": {
+          "sms_code": "SMS code"
+        }
+      },
+      "tokens": {
+        "title": "小米运动健康 — Manual Token Entry",
+        "description": "Advanced: enter account credentials obtained from your own Mi Fitness session.\n\n• ssecurity, userId, cUserId — from the serviceLoginAuth2 response\n• passToken — from the serviceLoginAuth2 Set-Cookie header\n• serviceToken — from the STS Set-Cookie header\n\npassToken lets the integration auto-refresh tokens without 2FA. Highly recommended for 2FA accounts.\n\nRegion: {region}",
+        "data": {
+          "user_id": "userId",
+          "c_user_id": "cUserId",
+          "ssecurity": "ssecurity",
+          "service_token": "serviceToken",
+          "pass_token": "passToken (recommended)",
+          "phone_id": "Phone ID (optional)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "小米运动健康 — Credentials Changed",
+        "description": "Automatic re-login failed. Your password may have changed — enter updated credentials.",
+        "data": {
+          "username": "Xiaomi account email or phone",
+          "password": "Password"
+        }
+      },
+      "reauth_captcha": {
+        "title": "小米运动健康 — Captcha",
+        "description": "Enter the text shown in the image:\n\n![Captcha](data:image/png;base64,{captcha_image})\n\nIf the image does not render, try opening: {captcha_url}",
+        "data": {
+          "captcha_code": "Captcha text"
+        }
+      },
+      "reauth_approval": {
+        "title": "小米运动健康 — Email Verification",
+        "description": "Xiaomi sent a verification code to your email (SMS channel was unavailable).\n\nEnter the code below — the integration will submit it automatically.",
+        "data": {
+          "email_code": "Code from email"
+        }
+      },
+      "reauth_sms_approval": {
+        "title": "小米运动健康 — SMS Verification",
+        "description": "A verification code was sent via SMS to your security phone ({phone}).\n\nEnter the 6-digit code below.",
+        "data": {
+          "sms_code": "SMS code"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid credentials or expired tokens.",
+      "cannot_connect": "Cannot connect to Mi Fitness API. Check region and internet.",
+      "login_failed": "Login failed. Check your credentials and try again.",
+      "captcha_invalid": "Wrong captcha. Try again.",
+      "unknown": "Unexpected error — check Home Assistant logs.",
+      "approval_not_detected": "Wrong or expired code. Check your email and try again.",
+      "sms_code_invalid": "Wrong or expired SMS code. Try again.",
+      "sms_send_failed": "Could not complete the SMS verification handshake (the SMS may have been sent"
+    },
+    "abort": {
+      "already_configured": "This Mi Fitness account is already configured.",
+      "reauth_successful": "Re-authentication successful."
+    }
+  }
+}

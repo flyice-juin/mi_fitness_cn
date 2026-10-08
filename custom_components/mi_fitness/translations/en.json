@@ -7,12 +7,20 @@
           "region": "Server region"
         }
       },
+      "browser_login": {
+        "title": "小米运动健康 — Browser Login",
+        "description": "① Open the link below, sign in to your Xiaomi account and confirm (any verification happens inside that page):\n\n[Sign in to Xiaomi account]({login_url})\n\n② After confirming, come back and press Submit — the integration finishes automatically.\n\nOr scan this QR code with your phone (optional):\n\n![QR](data:image/png;base64,{qr_image})\n\nThe link is valid for about {timeout} seconds; pressing Submit after expiry generates a new one.{status}"
+      },
       "wait_login": {
-        "title": "Browser Login — Waiting for confirmation",
-        "description": "Open the link below, sign in to your Xiaomi account and confirm (any verification happens inside that page):\n\n[Sign in to Xiaomi account]({login_url})\n\nThis page finishes automatically after you confirm — no other action needed.\n\nOr scan this QR code with your phone (optional):\n\n![QR](data:image/png;base64,{qr_image})\n\nThe link is valid for about {timeout} seconds and refreshes automatically when expired.{status}"
+        "title": "Waiting for login",
+        "description": "Waiting for the browser login to confirm… finishes automatically. Link: {login_url}"
       }
     },
-    "error": {},
+    "error": {
+      "link_start_failed": "Could not obtain a login link. Press Submit to retry.",
+      "cannot_connect": "Cannot connect to the Mi Fitness API. Check region and internet.",
+      "unknown": "Unexpected error — check Home Assistant logs."
+    },
     "abort": {
       "already_configured": "This Xiaomi account is already configured.",
       "reauth_successful": "Re-authentication successful, credentials refreshed.",

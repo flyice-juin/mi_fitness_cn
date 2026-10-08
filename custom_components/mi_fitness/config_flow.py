@@ -65,7 +65,7 @@ class MiFitnessConfigFlow(ConfigFlow, domain=DOMAIN):
     # ── 浏览器链接登录 ────────────────────────────────────────────────────────
 
     async def _qr_poll_loop(self) -> None:
-        """后台长轮询:用户在浏览器确认后拿凭证,并自动推进配置流。"""
+        """后台长轮询:用户在浏览器确认后拿凭证,存好等待用户提交。"""
         try:
             self._qr_result = await self.hass.async_add_executor_job(
                 self._login_session.qr_login_poll
@@ -73,13 +73,6 @@ class MiFitnessConfigFlow(ConfigFlow, domain=DOMAIN):
         except Exception as exc:  # noqa: BLE001 — 轮询失败统一呈现给用户
             self._qr_error = exc
             _LOGGER.warning("浏览器登录轮询失败: %s", exc)
-        # 无论成功失败都自动推进:成功 → 落库;失败 → 换新链接重新展示
-        try:
-            self.hass.async_create_task(
-                self.hass.config_entries.flow.async_configure(self.flow_id)
-            )
-        except Exception:
-            _LOGGER.debug("配置流自动推进失败,可手动点「提交」", exc_info=True)
 
     def _reset_login(self) -> None:
         self._login_session = None
@@ -91,21 +84,16 @@ class MiFitnessConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_browser_login(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """直接展示进度页:前端自动轮询,登录确认后自动完成(零点击)。"""
-        # 登录已完成 → 落库
+        """表单页展示登录链接与二维码(HA 表单渲染可靠、一定可见)。
+
+        用户登录确认后点「提交」→ 若凭证已就绪直接落库;
+        若还在等待(极少数)→ 转入进度页自动等待并自动完成。
+        """
+        errors: dict[str, str] = {}
+
+        # 凭证已就绪 → 落库
         if self._qr_result is not None:
             return await self._finish_login(self._qr_result)
-
-        # 轮询失败(链接过期等)自动推进到这里(任务已结束)→ 重置重生成
-        if (
-            self._qr_error is not None
-            and self._qr_task is not None
-            and self._qr_task.done()
-        ):
-            note = str(self._qr_error)
-            self._reset_login()
-            self._status_note = f"{note};已自动生成新的登录链接"
-            return await self.async_step_browser_login()
 
         # 首次进入:申请登录链接 + 启动后台轮询
         if self._login_session is None:
@@ -116,15 +104,39 @@ class MiFitnessConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
             except XiaomiLoginError as exc:
                 _LOGGER.warning("申请登录链接失败: %s", exc)
-                return self.async_abort(reason="link_start_failed")
+                self._login_session = None
+                self._status_note = "获取登录链接失败,点「提交」重试"
+                return self._show_browser_form(errors={"base": "link_start_failed"})
             self._qr_task = self.hass.async_create_task(self._qr_poll_loop())
 
-        # 进度页:说明里带登录链接与二维码,前端轮询任务完成即自动关闭
+        # 用户点了「提交」
+        if user_input is not None and self._qr_task is not None:
+            if self._qr_task.done():
+                if self._qr_error is not None:
+                    # 链接过期等 → 换新链接,提示可见
+                    note = str(self._qr_error)
+                    self._reset_login()
+                    self._status_note = f"{note};已生成新的登录链接,请重新登录"
+                    return await self.async_step_browser_login()
+                return await self._finish_login(self._qr_result)
+            # 还在等待登录确认 → 进度页(前端轮询,凭证到位后自动完成)
+            return self.async_show_progress(
+                step_id="wait_login",
+                progress_action="wait_login",
+                progress_task=self._qr_task,
+                description_placeholders={
+                    "login_url": self._login_info.get("login_url", ""),
+                },
+            )
+
+        return self._show_browser_form(errors=errors)
+
+    def _show_browser_form(self, errors: dict[str, str] | None = None) -> ConfigFlowResult:
         info = self._login_info or {}
-        return self.async_show_progress(
-            step_id="wait_login",
-            progress_action="wait_login",
-            progress_task=self._qr_task,
+        return self.async_show_form(
+            step_id="browser_login",
+            data_schema=vol.Schema({}),
+            errors=errors or {},
             description_placeholders={
                 "login_url": info.get("login_url", ""),
                 "qr_image":  info.get("qr_image_b64", ""),
@@ -136,15 +148,24 @@ class MiFitnessConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_wait_login(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """进度页:登录任务结束后由 flow manager 自动推进到这里。"""
+        """进度页:登录任务完成后由 flow manager 自动推进到这里。"""
         if self._qr_result is not None:
             return await self._finish_login(self._qr_result)
         if self._qr_error is not None:
             note = str(self._qr_error)
             self._reset_login()
-            self._status_note = f"{note};已自动生成新的登录链接"
+            self._status_note = f"{note};已生成新的登录链接,请重新登录"
             return await self.async_step_browser_login()
         # 任务未完成却被推进(前端重试等)→ 继续展示进度
+        if self._qr_task is not None and not self._qr_task.done():
+            return self.async_show_progress(
+                step_id="wait_login",
+                progress_action="wait_login",
+                progress_task=self._qr_task,
+                description_placeholders={
+                    "login_url": self._login_info.get("login_url", ""),
+                },
+            )
         return await self.async_step_browser_login()
 
     async def async_step_wait_login(

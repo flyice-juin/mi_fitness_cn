@@ -42,7 +42,7 @@ class MiFitnessSensorDescription(SensorEntityDescription):
 SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     MiFitnessSensorDescription(
         key="steps_today",
-        name="Steps Today",
+        name="今日步数",
         data_key="steps_today",
         native_unit_of_measurement="steps",
         state_class=SensorStateClass.TOTAL_INCREASING,
@@ -50,7 +50,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="distance_today",
-        name="Distance Today",
+        name="今日距离",
         data_key="distance_today",
         native_unit_of_measurement=UnitOfLength.METERS,
         device_class=SensorDeviceClass.DISTANCE,
@@ -59,7 +59,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="calories_today",
-        name="Calories Today",
+        name="今日活动卡路里",
         data_key="calories_today",
         native_unit_of_measurement="kcal",
         state_class=SensorStateClass.TOTAL_INCREASING,
@@ -67,7 +67,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="heart_rate",
-        name="Heart Rate",
+        name="当前心率",
         data_key="heart_rate",
         native_unit_of_measurement="bpm",
         state_class=SensorStateClass.MEASUREMENT,
@@ -76,7 +76,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="resting_heart_rate",
-        name="Resting Heart Rate",
+        name="静息心率",
         data_key="resting_heart_rate",
         native_unit_of_measurement="bpm",
         state_class=SensorStateClass.MEASUREMENT,
@@ -85,7 +85,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="heart_rate_avg_today",
-        name="Average Heart Rate Today",
+        name="今日平均心率",
         data_key="heart_rate_avg_today",
         native_unit_of_measurement="bpm",
         state_class=SensorStateClass.MEASUREMENT,
@@ -94,7 +94,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="sleep_duration",
-        name="Sleep Duration",
+        name="睡眠时长",
         data_key="sleep_duration",
         native_unit_of_measurement=UnitOfTime.MINUTES,
         device_class=SensorDeviceClass.DURATION,
@@ -103,7 +103,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="sleep_deep",
-        name="Deep Sleep Duration",
+        name="深睡时长",
         data_key="sleep_deep",
         native_unit_of_measurement=UnitOfTime.MINUTES,
         device_class=SensorDeviceClass.DURATION,
@@ -112,7 +112,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="sleep_light",
-        name="Light Sleep Duration",
+        name="浅睡时长",
         data_key="sleep_light",
         native_unit_of_measurement=UnitOfTime.MINUTES,
         device_class=SensorDeviceClass.DURATION,
@@ -121,7 +121,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="sleep_rem",
-        name="REM Sleep Duration",
+        name="REM 睡眠时长",
         data_key="sleep_rem",
         native_unit_of_measurement=UnitOfTime.MINUTES,
         device_class=SensorDeviceClass.DURATION,
@@ -130,7 +130,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="sleep_avg_hr",
-        name="Sleep Average Heart Rate",
+        name="睡眠平均心率",
         data_key="sleep_avg_hr",
         native_unit_of_measurement="bpm",
         state_class=SensorStateClass.MEASUREMENT,
@@ -139,7 +139,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="weight",
-        name="Weight",
+        name="体重",
         data_key="weight",
         native_unit_of_measurement=UnitOfMass.KILOGRAMS,
         device_class=SensorDeviceClass.WEIGHT,
@@ -148,7 +148,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="spo2",
-        name="Blood Oxygen (SpO2)",
+        name="血氧饱和度",
         data_key="spo2",
         native_unit_of_measurement="%",
         state_class=SensorStateClass.MEASUREMENT,
@@ -156,7 +156,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="stand_hours_today",
-        name="Stand Hours Today",
+        name="今日站立小时",
         data_key="stand_hours_today",
         native_unit_of_measurement="h",
         state_class=SensorStateClass.TOTAL_INCREASING,
@@ -164,7 +164,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="vitality_high",
-        name="High Intensity Vitality",
+        name="高强度活力",
         data_key="vitality_high",
         native_unit_of_measurement="min",
         state_class=SensorStateClass.MEASUREMENT,
@@ -172,7 +172,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="vitality_medium",
-        name="Medium Intensity Vitality",
+        name="中强度活力",
         data_key="vitality_medium",
         native_unit_of_measurement="min",
         state_class=SensorStateClass.MEASUREMENT,
@@ -180,7 +180,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="vitality_low",
-        name="Low Intensity Vitality",
+        name="低强度活力",
         data_key="vitality_low",
         native_unit_of_measurement="min",
         state_class=SensorStateClass.MEASUREMENT,
@@ -188,7 +188,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="sleep_quality",
-        name="Sleep Quality",
+        name="睡眠评分",
         data_key="sleep_quality",
         native_unit_of_measurement="%",
         state_class=SensorStateClass.MEASUREMENT,
@@ -196,13 +196,13 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="sleep_chronotype",
-        name="Sleep Chronotype",
+        name="睡眠体型",
         data_key="sleep_chronotype",
         icon="mdi:paw",
     ),
     MiFitnessSensorDescription(
         key="sleep_efficiency",
-        name="Sleep Efficiency",
+        name="睡眠效率",
         data_key="sleep_efficiency",
         native_unit_of_measurement="%",
         state_class=SensorStateClass.MEASUREMENT,
@@ -210,7 +210,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="sleep_awake_count",
-        name="Sleep Awake Count",
+        name="夜醒次数",
         data_key="sleep_awake_count",
         native_unit_of_measurement="times",
         state_class=SensorStateClass.MEASUREMENT,
@@ -218,7 +218,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="sleep_max_hr",
-        name="Sleep Max Heart Rate",
+        name="睡眠最高心率",
         data_key="sleep_max_hr",
         native_unit_of_measurement="bpm",
         state_class=SensorStateClass.MEASUREMENT,
@@ -226,7 +226,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="sleep_min_hr",
-        name="Sleep Min Heart Rate",
+        name="睡眠最低心率",
         data_key="sleep_min_hr",
         native_unit_of_measurement="bpm",
         state_class=SensorStateClass.MEASUREMENT,
@@ -234,14 +234,14 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="sleep_bedtime",
-        name="Bedtime",
+        name="就寝时间",
         data_key="sleep_bedtime",
         device_class=SensorDeviceClass.TIMESTAMP,
         icon="mdi:bed-clock",
     ),
     MiFitnessSensorDescription(
         key="sleep_wakeup",
-        name="Wake Up Time",
+        name="起床时间",
         data_key="sleep_wakeup",
         device_class=SensorDeviceClass.TIMESTAMP,
         icon="mdi:alarm",

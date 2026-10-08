@@ -4,90 +4,20 @@
       "user": {
         "title": "小米运动健康 — 设置",
         "data": {
-          "auth_method": "认证方式",
           "region": "服务器区域"
         }
       },
-      "password": {
-        "title": "小米运动健康 — 小米账号登录",
-        "description": "输入小米账号和密码。如触发身份验证,将优先尝试短信验证码(发送到安全手机),失败时回退到邮箱验证码。",
-        "data": {
-          "username": "小米账号(手机号或邮箱)",
-          "password": "密码"
-        }
-      },
-      "captcha": {
-        "title": "小米运动健康 — 需要图形验证码",
-        "description": "输入图片中的字符:\n\n![验证码](data:image/png;base64,{captcha_image})\n\n若图片未显示,可尝试打开链接查看: {captcha_url}",
-        "data": {
-          "captcha_code": "图形验证码"
-        }
-      },
-      "approval": {
-        "title": "小米运动健康 — 邮箱验证",
-        "description": "小米已向你的安全邮箱发送验证码(短信通道不可用,已回退邮箱)。\n\n在下方输入验证码,集成会自动提交。",
-        "data": {
-          "email_code": "邮箱验证码"
-        }
-      },
-      "sms_approval": {
-        "title": "小米运动健康 — 短信验证",
-        "description": "验证码已通过短信发送到你的安全手机({phone})。\n\n在下方输入 6 位短信验证码。",
-        "data": {
-          "sms_code": "短信验证码"
-        }
-      },
-      "tokens": {
-        "title": "小米运动健康 — 手动填入 Token",
-        "description": "高级用法:填入从你自己的小米运动健康会话中取得的凭证。\n\n• ssecurity、userId、cUserId — 来自 serviceLoginAuth2 响应\n• passToken — 来自 serviceLoginAuth2 的 Set-Cookie\n• serviceToken — 来自 STS 的 Set-Cookie\n\n填入 passToken 后,集成可在 serviceToken 过期时免验证码静默续期,强烈建议填写。\n\n区域:{region}",
-        "data": {
-          "user_id": "userId",
-          "c_user_id": "cUserId",
-          "ssecurity": "ssecurity",
-          "service_token": "serviceToken",
-          "pass_token": "passToken(建议填写)",
-          "phone_id": "Phone ID(可选)"
-        }
-      },
-      "reauth_confirm": {
-        "title": "小米运动健康 — 凭证已失效",
-        "description": "自动重新登录失败,密码可能已修改——请输入最新的账号密码。",
-        "data": {
-          "username": "小米账号(手机号或邮箱)",
-          "password": "密码"
-        }
-      },
-      "reauth_captcha": {
-        "title": "小米运动健康 — 图形验证码",
-        "description": "输入图片中的字符:\n\n![验证码](data:image/png;base64,{captcha_image})\n\n若图片未显示,可尝试打开链接查看: {captcha_url}",
-        "data": {
-          "captcha_code": "图形验证码"
-        }
-      },
-      "reauth_approval": {
-        "title": "小米运动健康 — 邮箱验证",
-        "description": "小米已向你的安全邮箱发送验证码(短信通道不可用,已回退邮箱)。\n\n在下方输入验证码,集成会自动提交。",
-        "data": {
-          "email_code": "邮箱验证码"
-        }
-      },
-      "reauth_sms_approval": {
-        "title": "小米运动健康 — 短信验证",
-        "description": "验证码已通过短信发送到你的安全手机({phone})。\n\n在下方输入 6 位短信验证码。",
-        "data": {
-          "sms_code": "短信验证码"
-        }
+      "browser_login": {
+        "title": "小米运动健康 — 浏览器登录",
+        "description": "点击下方链接,在浏览器中登录小米账号并确认(如触发验证,直接在页面上完成即可):\n\n[点此登录小米账号]({login_url})\n\n登录确认后本页面会自动继续;若长时间未继续,点「提交」手动检查。\n\n也可以用手机扫这个二维码(可选):\n\n![二维码](data:image/png;base64,{qr_image})\n\n链接有效期约 {timeout} 秒,过期会自动生成新链接。{status}"
       }
     },
     "error": {
-      "invalid_auth": "账号密码错误,或 token 已失效。",
-      "cannot_connect": "无法连接 小米运动健康 API,请检查区域设置和网络。",
-      "login_failed": "登录失败,请检查账号密码后重试。",
-      "captcha_invalid": "图形验证码错误,请重试。",
-      "unknown": "未知错误——请查看 Home Assistant 日志。",
-      "approval_not_detected": "验证码错误或已过期,请检查邮箱后重试。",
-      "sms_code_invalid": "短信验证码错误或已过期,请重试。",
-      "sms_send_failed": "短信验证码发送失败或链路异常,请重试;若多次失败请查看 HA 日志,或改用「手动填入 Token」方式。"
+      "link_start_failed": "获取登录链接失败,点「提交」重试。",
+      "login_not_detected": "尚未检测到登录确认。请在浏览器完成登录后,再点「提交」。",
+      "login_expired": "登录链接已过期,已生成新链接,请重新完成登录。",
+      "cannot_connect": "无法连接小米运动健康 API,请检查区域设置和网络。",
+      "unknown": "未知错误——请查看 Home Assistant 日志。"
     },
     "abort": {
       "already_configured": "该小米账号已配置过。",

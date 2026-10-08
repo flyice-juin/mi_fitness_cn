@@ -9,14 +9,7 @@ CONF_SERVICE_TOKEN = "service_token"
 CONF_REGION        = "region"
 CONF_PHONE_ID      = "phone_id"
 
-# Path B — auto login
-CONF_USERNAME      = "username"
-CONF_PASSWORD      = "password"
-CONF_AUTH_METHOD   = "auth_method"
 CONF_PASS_TOKEN    = "pass_token"    # passToken — used for silent serviceToken refresh
-
-AUTH_METHOD_TOKENS   = "tokens"    # Path A: manual token entry
-AUTH_METHOD_PASSWORD = "password"  # Path B: username + password auto-login
 
 REGIONS = ["us", "de", "sg", "cn", "ru", "i2"]
 DEFAULT_REGION = "cn"

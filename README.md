@@ -1,113 +1,56 @@
-# Mi Fitness — Home Assistant
+# 小米运动健康 — Home Assistant 集成(国内适配版)
 
-Unofficial Home Assistant integration that pulls health & fitness data (steps,
-heart rate, sleep, vitality, SpO₂, weight, stand hours …) from the Xiaomi **Mi
-Fitness / MiHealth** cloud. Data is read at the account level — whatever your
-Xiaomi devices (bands, scales, …) sync to Mi Fitness shows up, regardless of
-which device produced it.
+非官方 Home Assistant 集成,从小米**运动健康**(Mi Fitness / 小米运动健康)云同步
+个人健康数据:步数、距离、卡路里、心率(当前/平均/静息)、睡眠(时长/深浅/REM/评分/
+效率/体型/夜醒)、血氧、站立小时、活力值、体重。
 
-> ⚠️ **Disclaimer — educational / unofficial.**
-> Not affiliated with, authorized, or endorsed by Xiaomi. It talks to a private
-> cloud API by reusing your own account session, which may break at any time and
-> may be against Xiaomi's Terms of Service. Use at your own risk, with your own
-> account only.
+> 基于上游 [batareya16/MiFitnessHass](https://github.com/batareya16/MiFitnessHass)(MIT)
+> 深度国内适配:登录方式、数据接口、界面全面针对国内账号重做。
 
----
+## 登录方式:浏览器链接登录(唯一方式)
 
-## Features
+配置时集成会给出一条**登录链接**,在电脑浏览器中点开 → 登录小米账号 → 确认,
+集成后台自动完成对接。全程:
 
-- Sensors: steps, distance, calories, heart rate (avg/max/min/resting), sleep
-  (duration, stages, quality, chronotype), vitality, stand hours, SpO₂, weight.
-- Silent token refresh using `passToken` — survives `serviceToken` expiry
-  without re-doing 2FA.
-- Custom Lovelace cards for activity and sleep (in [`www/`](www/)).
+- **不需要输入密码**(密码登录在国内风控下基本走不通,已移除)
+- **不需要手机扫码**(链接在电脑浏览器直接打开即可;二维码仅作手机端可选捷径)
+- **不需要手动复制 token**
+- 万一触发风控,验证在小米自己的登录页面里交互式完成,集成不做任何对抗
+- 登录拿到 `passToken` 后,`serviceToken` 过期会**静默续期**,正常情况一次配置长期使用
 
----
+数据读取为**账户级**:手环/手表/体脂秤同步到小米运动健康 App 的数据都会出现,
+与具体设备无关。每 15 分钟轮询一次,历史数据在首轮同步后补齐。
 
-## Installation (HACS)
+## 安装
 
-1. HACS → **⋮** → **Custom repositories**.
-2. Add `https://github.com/batareya16/MiFitnessHass` as category **Integration**.
-3. Install **Mi Fitness**, then restart Home Assistant.
-4. **Settings → Devices & Services → Add Integration → Mi Fitness**.
+### HACS(推荐)
 
-### Manual install
+HACS → 自定义仓库 → 添加本仓库地址(类别:Integration)→ 安装「小米运动健康」
+→ 重启 HA → 设置 → 设备与服务 → 添加集成 → 搜索「小米运动健康」。
 
-Copy `custom_components/mi_fitness/` into your HA `config/custom_components/`
-and restart.
+### 手动
 
----
+把 `custom_components/mi_fitness/` 整个目录复制到 HA 配置目录的
+`custom_components/` 下,重启 HA。
 
-## Setup
+## 配置
 
-Two authentication paths in the config flow:
+1. 添加集成,区域选 `cn`(国内账号)
+2. 点开**登录链接**,在浏览器登录小米账号并确认
+3. 完成。之后可在面板/自动化中使用 25 个实体(步数、心率、睡眠等,名称已中文化)
 
-### A. Username + password (recommended)
-Enter your Xiaomi account email/phone and password. If 2FA is enabled, a code
-is emailed to you and entered in the next step. The integration stores a
-`passToken` so it can refresh expired session tokens silently afterwards.
+## 传感器一览
 
-### B. Manual token entry
-Advanced fallback for accounts where automated login fails. Supply credentials
-obtained from your own Mi Fitness account session:
+步数/距离/卡路里(当日 + 14 天历史)、当前/平均/静息心率、睡眠时长/深睡/浅睡/REM/
+评分/效率/夜醒次数/就寝/起床/体型、血氧、站立小时、活力值(高中低)、体重。
 
-- `ssecurity`, `userId`, `cUserId` — from the `serviceLoginAuth2` response
-- `passToken` — from the `serviceLoginAuth2` `Set-Cookie` header
-- `serviceToken` — from the STS `Set-Cookie` header
+## 技术说明
 
-Paste them into the form. `passToken` is optional but strongly recommended (it
-enables silent refresh).
+- 数据接口:`hlth.io.mi.com`(国内裸域),RC4+SHA1 签名,水位增量拉取
+- 心率/睡眠等天级汇总来自 `daily_report` 聚合接口(国内账号的原始流不含这些条目)
+- 凭证仅存于本机 HA 的 `.storage`,请勿将 HA 配置目录提交到公开仓库
 
----
+## 免责声明
 
-## Lovelace cards
-
-The integration ships custom cards (in
-[`custom_components/mi_fitness/www/`](custom_components/mi_fitness/www/)) and
-**registers them automatically** — no manual resource setup needed.
-
-Just add them to a dashboard:
-
-```yaml
-type: custom:mi-fitness-sleep-card
-
-type: custom:mi-fitness-sleep-streak-card
-goal_hours: 7
-goal_minutes: 30
-name: Sleep Goal
-
-type: custom:mi-fitness-activity-card
-step_goal: 6000
-
-type: custom:mi-fitness-activity-streak-card
-step_goal: 6000
-name: Step Goal
-```
-
-The account is detected automatically from your entities — no `user_id` needed.
-Only set it to disambiguate when you have **more than one** Mi Fitness account
-configured:
-
-```yaml
-type: custom:mi-fitness-sleep-card
-user_id: "1234567890"   # optional; the suffix in sensor.mi_fitness_<user_id>_…
-```
-
-> To find it manually: **Developer Tools → States**, filter `mi_fitness` — the
-> number in the entity id (e.g. `sensor.mi_fitness_1234567890_steps_today`) is
-> your `user_id`.
-
-> After updating the integration, hard-refresh the browser (Ctrl+Shift+R) so
-> the new card code loads.
-
----
-
-## Privacy
-
-No credentials or device identifiers are committed to this repository. Your
-tokens are stored only in your own Home Assistant instance
-(`.storage/core.config_entries`) — never commit your HA config.
-
-## License
-
-[MIT](LICENSE)
+本项目与小米官方无关。所有接口均为逆向的非官方私有接口,可能随小米改版失效,
+仅供学习与个人使用。

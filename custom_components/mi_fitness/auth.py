@@ -1,40 +1,26 @@
-"""
-Xiaomi account login — extracts ssecurity + serviceToken automatically.
-Ported from mi_get_creds.py, adapted for async HA config flow.
+# -*- coding: utf-8 -*-
+"""小米账号认证 —— 浏览器链接登录(免密码/免验证码/免手机)。
 
-Login is a 3-step dance:
-  1. GET  https://account.xiaomi.com/pass/serviceLogin?sid=miothealth  → _sign
-  2. POST https://account.xiaomi.com/pass/serviceLoginAuth2          → ssecurity + location
-     (may loop: captcha code needed, or identity verification needed)
-  3. GET  {location}  (→ sts.api.io.mi.com/sts)                      → serviceToken cookie
+登录哲学:不在代码里模拟 App 登录接口。小米对"陌生设备模拟客户端"
+层层设卡(短信/图形码/设备信任),程序硬闯是死路;而浏览器登录是小米
+为人类设计的正门 —— 万一触发风控,验证就在小米自己的页面里交互式完成。
 
-Email 2FA flow (when notificationUrl returned):
-  1. GET  notificationUrl                               → HTML page (authStart)
-  2. GET  /identity/list?sid=xiaomiio&context=<ctx>     → sets identity_session cookie
-  3. POST /identity/auth/sendEmailTicket                → email sent
-  4. POST /identity/auth/verifyEmail (ticket=<otp>)     → location or fallback
-  5. GET  /identity/result/check                        → 302 → Auth2/end URL
-  6. GET  Auth2/end (no redirect)                       → extension-pragma header → ssecurity
-  7. GET  STS URL                                       → serviceToken cookie
+流程(设备流登录,类似电视上登 YouTube):
+  1. GET  /longPolling/loginUrl (sid=miothealth) → {qr, loginUrl, lp, timeout}
+  2. 用户在电脑浏览器打开 loginUrl → 登录(如需验证在页面内完成)→ 确认
+  3. GET  {lp} 长轮询 → 登录成功返回 ssecurity/userId/passToken/cUserId/location
+  4. GET  {location} (STS) → serviceToken cookie
 
-SMS 2FA flow (CN accounts — the standard channel there):
-  1. GET  /pass/preference                              → prepare ticket context
-  2. POST /pass/sendServiceLoginTicket                  → SMS sent to security phone
-  3. POST /pass/phoneInfo                               → masked phone + ticketToken cookie
-  4. GET  /pass/serviceLogin?_loginSign=ticket          → fresh _sign for ticket login
-  5. POST /pass/serviceLoginTicketAuth (ticket=<code>)  → ssecurity + location (direct success)
-  6. GET  {location}                                    → serviceToken cookie
+passToken 之后由 coordinator 在 serviceToken 过期时静默换新
+(try_silent_token_refresh),正常情况用户不会再见到登录流程。
 """
 
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import logging
 import random
-import re
-import string
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -42,1120 +28,23 @@ import requests
 
 _LOGGER = logging.getLogger(__name__)
 
+SID = "miothealth"
+QR_LOGIN_URL = "https://account.xiaomi.com/longPolling/loginUrl"
+STS_HEALTH_URL = "https://sts-hlth.io.mi.com/healthapp/sts"
+XIAOMI_LOGIN_URL = "https://account.xiaomi.com/pass/serviceLogin"
 
-# ── Exception hierarchy ───────────────────────────────────────────────────────
+# 登录用 UA = 小米运动健康 CN 版 App 指纹(passToken 续期与 STS 同源需要)
+_UA_LOGIN = (
+    "Dalvik/2.1.0 (Linux; U; Android 12; V2284A Build/ab8c0d1.1) "
+    "APP/mi.health APPV/353001 MK/VjIyODRB SDKV/5.3.0.release.68 "
+    "CPN/com.mi.health PassportSDK/"
+)
+
+_MAX_POLL_SECONDS = 300  # 登录链接有效期上限(小米侧 timeout 一般 300s)
+
 
 class XiaomiLoginError(Exception):
     """Base login error."""
-
-class XiaomiInvalidCredentials(XiaomiLoginError):
-    """Wrong username or password."""
-
-class XiaomiCaptchaRequired(XiaomiLoginError):
-    """Captcha challenge. Attributes: captcha_url (str), captcha_sign (str)."""
-    def __init__(self, captcha_url: str, captcha_sign: str):
-        super().__init__("Captcha required")
-        self.captcha_url  = captcha_url
-        self.captcha_sign = captcha_sign
-
-class XiaomiApprovalRequired(XiaomiLoginError):
-    """Phone/email approval required. Attributes: notification_url, approval_sign."""
-    def __init__(self, notification_url: str, approval_sign: str):
-        super().__init__("Phone approval required")
-        self.notification_url = notification_url
-        self.approval_sign    = approval_sign
-
-
-class XiaomiSmsRequired(XiaomiLoginError):
-    """SMS verification required (CN accounts: code 70016 / securityStatus != 0)."""
-
-
-# ── Session builder ───────────────────────────────────────────────────────────
-
-# CN passport endpoints for the SMS ticket flow (the standard 2FA channel for
-# CN accounts — CN-native apps only implement this channel, never email).
-XIAOMI_LOGIN_URL      = "https://account.xiaomi.com/pass/serviceLogin"
-XIAOMI_PREFERENCE_URL = "https://account.xiaomi.com/pass/preference"
-XIAOMI_SEND_TICKET_URL = "https://account.xiaomi.com/pass/sendServiceLoginTicket"
-XIAOMI_PHONE_INFO_URL = "https://account.xiaomi.com/pass/phoneInfo"
-XIAOMI_TICKET_AUTH_URL = "https://account.xiaomi.com/pass/serviceLoginTicketAuth"
-
-def _make_login_session() -> requests.Session:
-    # Native-app Dalvik UA. The server issues a different ssecurity based on UA —
-    # the UA must name the app package that owns the sid. CN 小米运动健康 = com.mi.health.
-    dev_hex = "".join(random.choices("0123456789abcdef", k=32))
-    ua = (
-        "Dalvik/2.1.0 (Linux; U; Android 12; V2284A Build/ab8c0d1.1) "
-        "APP/mi.health APPV/353001 MK/VjIyODRB "
-        "SDKV/5.3.0.release.68 CPN/com.mi.health PassportSDK/"
-    )
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent":   ua,
-        "Content-Type": "application/x-www-form-urlencoded",
-    })
-    s.cookies.update({"sdkVersion": "3.8.6", "deviceId": f"an_{dev_hex}"})
-    return s
-
-
-# ── Step helpers ─────────────────────────────────────────────────────────────
-
-def _get_sign(session: requests.Session, username: str, login_sign: str = "") -> tuple[str, str]:
-    """Step 1: fetch _sign cookie (+ callback). Returns (sign, callback)."""
-    # Seed userId only when absent — a numeric userId from a previous auth
-    # response must not be clobbered back to the raw username (phone string);
-    # phoneInfo parses this cookie server-side and errors on non-numeric ids.
-    if not session.cookies.get("userId"):
-        session.cookies.set("userId", username)
-    params = {
-        "_json":   "true",
-        "appName": "com.mi.health",
-        "sid":     "miothealth",
-        "_locale": "zh_CN",
-    }
-    if login_sign:
-        params["_loginSign"] = login_sign
-    r = session.get(XIAOMI_LOGIN_URL, params=params, timeout=15)
-    d = json.loads(r.text.replace("&&&START&&&", ""))
-    return d.get("_sign", ""), d.get("callback", "")
-
-
-def _post_credentials(
-    session: requests.Session,
-    username: str,
-    password: str,
-    sign: str,
-    captcha_code: str = "",
-) -> dict:
-    """Step 2: POST login form. Returns raw response dict."""
-    post: dict = {
-        "sid":      "miothealth",
-        "hash":     hashlib.md5(password.encode()).hexdigest().upper(),
-        "callback": "https://sts-hlth.io.mi.com/healthapp/sts",
-        "qs":       "%3Fsid%3Dmiothealth",
-        "user":     username,
-        "_json":    "true",
-        "_locale":  "zh_CN",
-    }
-    if sign:
-        post["_sign"] = sign
-    if captcha_code:
-        post["captCode"] = captcha_code
-
-    r = session.post(
-        "https://account.xiaomi.com/pass/serviceLoginAuth2",
-        data=post,
-        headers={"Referer": XIAOMI_LOGIN_URL},
-        timeout=15,
-    )
-    return json.loads(r.text.replace("&&&START&&&", ""))
-
-
-def _get_service_token(session: requests.Session, location: str) -> str:
-    """Step 3: follow redirect → grab serviceToken from Set-Cookie."""
-    session.headers.update({"content-type": "application/x-www-form-urlencoded"})
-    r = session.get(location, timeout=15)
-    _LOGGER.warning(
-        "STS response: url=%s status=%d cookies=%s",
-        r.url, r.status_code,
-        [c.name for c in r.cookies] + [c.name for c in session.cookies
-                                        if c.name not in [rc.name for rc in r.cookies]],
-    )
-
-    token = r.cookies.get("serviceToken")
-    if not token:
-        for c in session.cookies:
-            if c.name == "serviceToken":
-                return c.value
-    if not token:
-        raise XiaomiLoginError("serviceToken not found in STS cookies")
-    return token
-
-
-def _extract_service_token_info(data: dict, label: str) -> dict:
-    """
-    Extract ssecurity + serviceToken from a response dict that may contain:
-      - direct fields: ssecurity, serviceToken  (passtoken/refresh style)
-      - nested:        serviceTokens.xiaomiio   (userprofile style, value is JSON string or dict)
-    Returns dict with ssecurity, service_token, user_id, c_user_id on success, else {}.
-    """
-    # Direct fields (passtoken/refresh response)
-    ssecurity     = data.get("ssecurity", "")
-    service_token = data.get("serviceToken", "")
-    user_id_out   = str(data.get("userId", ""))
-    c_user_id_out = data.get("cUserId", "")
-
-    if ssecurity and service_token:
-        _LOGGER.warning("%s: direct ssecurity+serviceToken found", label)
-        return {
-            "ssecurity":     ssecurity,
-            "service_token": service_token,
-            "user_id":       user_id_out,
-            "c_user_id":     c_user_id_out,
-        }
-
-    # Nested serviceTokens (userprofile response)
-    tokens = data.get("serviceTokens", {})
-    if tokens:
-        token_raw = tokens.get("xiaomiio") or (next(iter(tokens.values()), None) if tokens else None)
-        if token_raw is not None:
-            if isinstance(token_raw, str):
-                try:
-                    token_info: dict = json.loads(token_raw)
-                except Exception:
-                    _LOGGER.warning("%s: cannot parse token_raw=%.100s", label, token_raw)
-                    return {}
-            else:
-                token_info = token_raw  # type: ignore[assignment]
-            ssecurity     = token_info.get("ssecurity", "")
-            service_token = token_info.get("serviceToken", "")
-            if ssecurity and service_token:
-                return {
-                    "ssecurity":     ssecurity,
-                    "service_token": service_token,
-                    "user_id":       str(data.get("userId", "")),
-                    "c_user_id":     token_info.get("cUserId", ""),
-                }
-            _LOGGER.warning(
-                "%s: serviceTokens.xiaomiio missing fields "
-                "(ssecurity=%s serviceToken=%s)",
-                label, bool(ssecurity), bool(service_token),
-            )
-            return {}
-
-    _LOGGER.warning(
-        "%s: no usable credentials — keys=%s",
-        label, list(data.keys()),
-    )
-    return {}
-
-
-def _exchange_pass_token(
-    session: requests.Session,
-    user_id: str,
-    pass_token: str,
-    sid: str = "miothealth",
-) -> dict:
-    """
-    Exchange passToken → ssecurity + serviceToken via GET /pass/serviceLogin.
-
-    Silently refreshes credentials: passToken is sent as a cookie and the
-    response carries ssecurity + a location to fetch serviceToken from.
-    No 2FA is triggered because passToken already proves a completed auth.
-
-    Returns dict with ssecurity, service_token, user_id, c_user_id, pass_token.
-    Empty dict on failure.
-    """
-    # Set passToken as a cookie — the endpoint reads it from cookies, not params
-    session.cookies.set("passToken", pass_token, domain="account.xiaomi.com")
-    session.cookies.set("userId",    user_id,    domain="account.xiaomi.com")
-
-    try:
-        # sid=miothealth with the sts-hlth.io.mi.com callback yields the
-        # health-specific ssecurity and serviceToken.
-        sids_to_try = [sid] if sid == "miothealth" else [sid, "miothealth"]
-        data: dict = {}
-        ssec = ""
-        for try_sid in sids_to_try:
-            r = session.get(
-                "https://account.xiaomi.com/pass/serviceLogin",
-                params={
-                    "_json":   "true",
-                    "sid":     try_sid,
-                    "_locale": "en_US",
-                },
-                timeout=15,
-            )
-            _LOGGER.debug("exchange_pass_token: HTTP=%d sid=%s", r.status_code, try_sid)
-            data = json.loads(r.text.replace("&&&START&&&", "").strip())
-            code = data.get("code", -1)
-            ssec = data.get("ssecurity", "")
-            if code == 0 and ssec:
-                _LOGGER.warning("exchange_pass_token: got ssecurity with sid=%s", try_sid)
-                break
-            _LOGGER.warning(
-                "exchange_pass_token sid=%s: code=%s ssec_present=%s loc_present=%s",
-                try_sid, code, bool(ssec), bool(data.get("location")),
-            )
-
-        location = data.get("location", "")
-        base_result = {
-            "ssecurity":     ssec,
-            "service_token": "",
-            "user_id":       str(data.get("userId", user_id)),
-            "c_user_id":     data.get("cUserId", ""),
-            "pass_token":    data.get("passToken", pass_token),
-        }
-
-        if ssec and location:
-            _LOGGER.warning("exchange_pass_token location: %s", location[:200])
-            try:
-                service_token = _get_service_token(session, location)
-                base_result["service_token"] = service_token
-                _LOGGER.warning(
-                    "exchange_pass_token SUCCESS: ssec_len=%d tok_len=%d",
-                    len(ssec), len(service_token),
-                )
-            except Exception as sts_exc:
-                # STS didn't return serviceToken (e.g. deviceinfo → api.device.xiaomi.net).
-                # Return ssecurity anyway so callers can use it with a separate serviceToken.
-                _LOGGER.warning(
-                    "exchange_pass_token: STS failed (%s) — returning ssecurity only (len=%d)",
-                    sts_exc, len(ssec),
-                )
-            return base_result
-
-        if ssec:
-            _LOGGER.warning("exchange_pass_token: ssecurity but no location")
-            return base_result
-
-        _LOGGER.warning("exchange_pass_token: failed all sids — no ssecurity obtained")
-    except Exception as exc:
-        _LOGGER.warning("exchange_pass_token exception: %s", exc)
-
-    return {}
-
-
-def try_silent_token_refresh(pass_token: str, user_id: str) -> dict:
-    """
-    Silently obtain fresh ssecurity + xiaomiio serviceToken using stored passToken.
-
-    Step 1: GET /pass/serviceLogin with passToken cookie → ssecurity
-            (Mi Fitness app uses sid=passportapi — falls back to it if xiaomiio fails)
-    Step 2: GET /pass/serviceLoginAuth2 with passToken cookie → xiaomiio location → serviceToken
-
-    Returns dict with ssecurity, service_token on success, or {} on failure.
-    """
-    if not pass_token or not user_id:
-        return {}
-    session = _make_login_session()
-
-    # miothealth exchange: gives health-specific ssecurity + serviceToken (sts-hlth.io.mi.com).
-    creds = _exchange_pass_token(session, user_id, pass_token, sid="miothealth")
-    ssecurity     = creds.get("ssecurity", "")
-    service_token = creds.get("service_token", "")
-
-    if ssecurity and service_token:
-        _LOGGER.warning(
-            "try_silent_token_refresh SUCCESS: ssec_len=%d tok_len=%d",
-            len(ssecurity), len(service_token),
-        )
-        return {
-            "ssecurity":     ssecurity,
-            "service_token": service_token,
-            "user_id":       creds.get("user_id", user_id),
-            "c_user_id":     creds.get("c_user_id", ""),
-            "pass_token":    pass_token,  # keep original, don't rotate
-        }
-
-    _LOGGER.warning(
-        "try_silent_token_refresh: failed — ssec=%s tok=%s",
-        bool(ssecurity), bool(service_token),
-    )
-    return {}
-
-
-# ── Public API ────────────────────────────────────────────────────────────────
-
-class XiaomiLoginSession:
-    """
-    Stateful login helper — used across multiple config-flow steps.
-
-    Typical usage in a non-captcha / non-2FA case:
-        ls = XiaomiLoginSession()
-        result = ls.start(username, password)   # raises or returns LoginResult
-
-    Captcha case:
-        try:
-            ls.start(username, password)
-        except XiaomiCaptchaRequired as e:
-            # show e.captcha_url to user, ask for code
-            result = ls.submit_captcha(code)
-
-    Email 2FA case:
-        try:
-            ls.start(username, password)
-        except XiaomiApprovalRequired:
-            ls.start_email_verification()       # sends email
-            result = ls.verify_with_code(otp)   # submit code
-    """
-
-    def __init__(self) -> None:
-        self._session               = _make_login_session()
-        self._username              = ""
-        self._password              = ""
-        self._last_sign             = ""
-        self._user_id               = ""
-        self._pass_token            = ""   # from serviceLoginAuth2 Set-Cookie or JSON
-        self._notification_url      = ""
-        self._context               = ""   # parsed from notificationUrl query string
-        self._verify_referer        = ""   # final URL after GET notificationUrl
-        self._ssecurity_2fa         = ""   # ssecurity from extension-pragma
-        self._psecurity_2fa         = ""   # psecurity from extension-pragma (try as signing key)
-        self._ssecurity_from_login  = ""   # ssecurity from serviceLoginAuth2 when 2FA triggered
-        self._c_user_id_from_login  = ""
-        self._ticket_sign           = ""   # _sign for SMS ticket login (_loginSign=ticket)
-        self._ticket_callback       = ""   # callback captured alongside _ticket_sign
-        self._captcha_image_b64     = ""   # last captcha image (base64) — session-bound challenge
-
-    @property
-    def captcha_image_b64(self) -> str:
-        """The captcha image bound to this session's captchaIck, as base64."""
-        return self._captcha_image_b64
-
-    def start(self, username: str, password: str) -> "LoginResult":
-        """Begin login. May raise XiaomiCaptchaRequired or XiaomiApprovalRequired."""
-        self._username = username
-        self._password = password
-        self._last_sign, _ = _get_sign(self._session, username)
-        return self._attempt(captcha_code="")
-
-    def submit_captcha(self, captcha_code: str) -> "LoginResult":
-        """Continue after user entered captcha text."""
-        return self._attempt(captcha_code=captcha_code)
-
-    def inject_service_token(self, service_token: str) -> None:
-        """
-        Inject a serviceToken from the user's browser into our session cookies.
-        After visiting notificationUrl, Xiaomi sets serviceToken on .mi.com domain.
-        Injecting it here lets the server link the verified browser session with
-        our API session on the next POST attempt.
-        """
-        for domain in ("account.xiaomi.com", ".xiaomi.com", "xiaomi.com"):
-            self._session.cookies.set("serviceToken", service_token, domain=domain)
-        _LOGGER.debug("Injected browser serviceToken into login session")
-
-    # ── Email 2FA flow ────────────────────────────────────────────────────────
-
-    def start_email_verification(self) -> None:
-        """
-        Initiate email OTP flow.  Must be called right after XiaomiApprovalRequired.
-
-        Steps:
-          1. GET notificationUrl          → HTML authStart page (sets session cookies)
-          2. GET /identity/list           → sets identity_session cookie (critical!)
-          3. POST sendEmailTicket         → Xiaomi sends OTP email
-        """
-        if not self._notification_url:
-            raise XiaomiLoginError("No notificationUrl — call start() first")
-        if not self._context:
-            raise XiaomiLoginError("No context parameter in notificationUrl")
-
-        context = self._context
-
-        # 1) GET notificationUrl (authStart) — must use our authenticated session
-        _LOGGER.debug("GET notificationUrl (authStart): %s", self._notification_url)
-        r = self._session.get(
-            self._notification_url,
-            timeout=15,
-            allow_redirects=True,
-        )
-        self._verify_referer = r.url
-        _LOGGER.debug("authStart: HTTP=%d  final_url=%s  cookies=%s",
-                      r.status_code, r.url, list(self._session.cookies.keys()))
-
-        # 2) GET /identity/list — this call sets identity_session cookie
-        _LOGGER.debug("GET /identity/list  context=%s", context)
-        r = self._session.get(
-            "https://account.xiaomi.com/identity/list",
-            params={"sid": "miothealth", "context": context, "_locale": "en_US"},
-            timeout=15,
-        )
-        _LOGGER.debug("identity/list: HTTP=%d  cookies=%s",
-                      r.status_code, list(self._session.cookies.keys()))
-
-        # 3) POST sendEmailTicket
-        dc = int(time.time() * 1000)
-        ick = self._session.cookies.get("ick", "")
-        r = self._session.post(
-            "https://account.xiaomi.com/identity/auth/sendEmailTicket",
-            params={
-                "_dc":     str(dc),
-                "sid":     "miothealth",
-                "context": context,
-                "mask":    "0",
-                "_locale": "en_US",
-            },
-            data={
-                "retry":  "0",
-                "icode":  "",
-                "_json":  "true",
-                "ick":    ick,
-            },
-            headers={"X-Requested-With": "XMLHttpRequest"},
-            timeout=15,
-        )
-        _LOGGER.warning("sendEmailTicket: HTTP=%d  body=%s",
-                        r.status_code, r.text[:300])
-        try:
-            jr = r.json()
-            code = jr.get("code", -1)
-            if code not in (0,) and jr.get("result") != "ok":
-                _LOGGER.warning("sendEmailTicket non-OK: code=%s msg=%s",
-                                code, jr.get("message", ""))
-        except Exception:
-            pass
-
-    def verify_with_code(self, otp_code: str) -> "LoginResult":
-        """
-        Submit OTP from email, then complete the verification chain:
-          1. POST /identity/auth/verifyEmail
-          2. GET  /identity/result/check  (fallback if no location returned)
-          3. GET  Auth2/end (no redirect) → extension-pragma → ssecurity
-          4. GET  STS URL                 → serviceToken cookie
-        """
-        if not self._context:
-            raise XiaomiLoginError("No context — call start_email_verification() first")
-
-        context = self._context
-        dc = int(time.time() * 1000)
-        ick = self._session.cookies.get("ick", "")
-
-        # 1) POST verifyEmail
-        r = self._session.post(
-            "https://account.xiaomi.com/identity/auth/verifyEmail",
-            params={
-                "_flag":   "8",
-                "_json":   "true",
-                "sid":     "miothealth",
-                "context": context,
-                "mask":    "0",
-                "_locale": "en_US",
-            },
-            data={
-                "_flag":  "8",
-                "ticket": otp_code.strip(),
-                "trust":  "false",
-                "_json":  "true",
-                "ick":    ick,
-            },
-            headers={"X-Requested-With": "XMLHttpRequest"},
-            timeout=15,
-        )
-        _LOGGER.warning("verifyEmail: HTTP=%d  body=%s",
-                        r.status_code, r.text[:400])
-
-        # Extract finish location from response (body may have &&&START&&& prefix)
-        finish_loc: str | None = None
-        numeric_user_id: str = ""
-        try:
-            resp_json = json.loads(r.text.replace("&&&START&&&", ""))
-            code = resp_json.get("code", -1)
-            result_str = resp_json.get("result", "")
-            _LOGGER.debug("verifyEmail json: code=%s result=%s", code, result_str)
-            finish_loc = resp_json.get("location")
-            # Extract numeric userId from location query params
-            if finish_loc:
-                try:
-                    loc_qs = parse_qs(urlparse(finish_loc).query)
-                    numeric_user_id = loc_qs.get("userId", [""])[0]
-                except Exception:
-                    pass
-            if not finish_loc and code not in (0,) and result_str != "ok":
-                _LOGGER.warning("verifyEmail code=%s, trying fallback", code)
-        except Exception:
-            pass
-
-        # 2) Fallback: GET /identity/result/check
-        if not finish_loc:
-            _LOGGER.debug("verifyEmail: no location, fallback to /identity/result/check")
-            r0 = self._session.get(
-                "https://account.xiaomi.com/identity/result/check",
-                params={"sid": "miothealth", "context": context, "_locale": "en_US"},
-                allow_redirects=False,
-                timeout=15,
-            )
-            _LOGGER.debug("result/check (fallback): HTTP=%d  Location=%s",
-                          r0.status_code, r0.headers.get("Location"))
-            if r0.status_code in (301, 302):
-                finish_loc = r0.headers.get("Location")
-
-        if not finish_loc:
-            raise XiaomiLoginError(
-                "Email verification failed: could not determine finish location"
-            )
-
-        # 3a) If finish_loc is result/check, follow it one hop to get Auth2/end URL
-        if "identity/result/check" in finish_loc:
-            r = self._session.get(finish_loc, allow_redirects=False, timeout=15)
-            _LOGGER.debug("result/check: HTTP=%d  Location=%s",
-                          r.status_code, r.headers.get("Location"))
-            end_url = r.headers.get("Location")
-        else:
-            end_url = finish_loc
-
-        if not end_url:
-            raise XiaomiLoginError("Auth2/end URL not found in verification chain")
-
-        # 3b) GET Auth2/end WITHOUT following redirects — grab extension-pragma header
-        r = self._session.get(end_url, allow_redirects=False, timeout=15)
-        _LOGGER.debug("Auth2/end: HTTP=%d  headers=%s",
-                      r.status_code, dict(r.headers))
-        # Some servers return 200 "Tips" page first, then 302 on repeat
-        if r.status_code == 200 and "Tips" in r.text:
-            r = self._session.get(end_url, allow_redirects=False, timeout=15)
-            _LOGGER.debug("Auth2/end (2nd): HTTP=%d", r.status_code)
-
-        # Extract ssecurity from extension-pragma
-        ext_prag = r.headers.get("extension-pragma")
-        _LOGGER.warning("Auth2/end: HTTP=%d  extension-pragma=%s",
-                        r.status_code, ext_prag[:200] if ext_prag else "MISSING")
-        if ext_prag:
-            try:
-                ep = json.loads(ext_prag)
-                ssec  = ep.get("ssecurity", "")
-                psec  = ep.get("psecurity", "")
-                # Store both — we'll try psecurity as signing key since ssecurity gave 401
-                self._ssecurity_2fa  = ssec
-                self._psecurity_2fa  = psec
-                _LOGGER.warning(
-                    "extension-pragma: ssecurity_len=%d prefix=%s  psecurity_len=%d prefix=%s",
-                    len(ssec), ssec[:8] if ssec else "-",
-                    len(psec), psec[:8] if psec else "-",
-                )
-            except Exception as exc:
-                _LOGGER.warning("Failed to parse extension-pragma: %s  raw=%s",
-                                exc, ext_prag[:100])
-
-        # 4) Find STS URL
-        sts_url: str | None = r.headers.get("Location")
-        if not sts_url and r.text:
-            idx = r.text.find("https://sts.api.io.mi.com/sts")
-            if idx != -1:
-                end = r.text.find('"', idx)
-                sts_url = r.text[idx: end if end != -1 else idx + 300]
-
-        if not sts_url:
-            raise XiaomiLoginError("STS URL not found after Auth2/end")
-
-        # 5) GET STS → serviceToken in cookies
-        r = self._session.get(sts_url, allow_redirects=True, timeout=15)
-        _LOGGER.warning("STS: HTTP=%d  final_url=%s  body=%s",
-                        r.status_code, r.url, r.text[:100])
-
-        service_token: str = r.cookies.get("serviceToken") or ""
-        if not service_token:
-            for c in self._session.cookies:
-                if c.name == "serviceToken":
-                    service_token = c.value
-                    break
-        _LOGGER.warning("STS: serviceToken_len=%d  all_cookie_names=%s",
-                        len(service_token),
-                        [c.name for c in self._session.cookies])
-        if not service_token:
-            raise XiaomiLoginError("serviceToken not found after STS redirect")
-
-        # Collect userId / cUserId
-        # Priority: numeric ID from verifyEmail response URL > stored > cookies
-        user_id = (
-            numeric_user_id
-            or self._user_id
-            or next((c.value for c in self._session.cookies if c.name == "userId"), "")
-        )
-        c_user_id = next(
-            (c.value for c in self._session.cookies if c.name == "cUserId"), ""
-        )
-        ssecurity = self._ssecurity_2fa
-
-        _LOGGER.warning(
-            "2FA chain: extension-pragma ssecurity_present=%s  token_len=%d  user_id=%s  "
-            "ssecurity_from_login_present=%s (len=%d)",
-            bool(ssecurity), len(service_token), user_id,
-            bool(self._ssecurity_from_login), len(self._ssecurity_from_login),
-        )
-
-        # ── Best: use ssecurity saved from initial serviceLoginAuth2 (most reliable)
-        # serviceLoginAuth2 returns ssecurity even when notificationUrl/2FA is required.
-        # This is the canonical account-level ssecurity, identical to what a normal
-        # login would return. All post-2FA endpoints (loginStep2, extension-pragma)
-        # give a different or less reliable ssecurity.
-        pass_token_for_result = (
-            next((c.value for c in self._session.cookies if c.name == "passToken"), "")
-            or self._pass_token
-        )
-
-        if self._ssecurity_from_login:
-            _LOGGER.warning(
-                "Using ssecurity from initial serviceLoginAuth2 (len=%d) — "
-                "skipping post-2FA token exchange",
-                len(self._ssecurity_from_login),
-            )
-            return LoginResult(
-                user_id=user_id,
-                c_user_id=self._c_user_id_from_login or c_user_id,
-                ssecurity=self._ssecurity_from_login,
-                service_token=service_token,
-                pass_token=pass_token_for_result,
-            )
-
-        # ── Primary: /pass/login/passtoken/app/userprofile
-        # Modern replacement for the dead loginStep2 endpoint.
-        # Takes userId + passToken → returns JSON with serviceTokens.xiaomiio
-        # which contains the CORRECT ssecurity + serviceToken for API signing.
-        # Prefer session-cookie passToken (may be refreshed by STS) over pre-2FA token
-        pass_token_cookie = (
-            next((c.value for c in self._session.cookies if c.name == "passToken"), "")
-            or self._pass_token
-        )
-        _LOGGER.warning(
-            "post-2FA credential fetch: passToken_len=%d  user_id=%s  "
-            "extension-pragma_ssecurity_len=%d  "
-            "all_cookie_names=%s",
-            len(pass_token_cookie), user_id,
-            len(ssecurity) if ssecurity else 0,
-            [c.name for c in self._session.cookies],
-        )
-
-        # ── Primary: passportapi ssecurity (fresh session) + 2FA STS token ─────
-        # Use BOTH ssecurity and serviceToken from the passportapi exchange (same session).
-        # passportapi serviceToken is len~320 vs xiaomiio/2FA STS len~192 — different tokens.
-        # All other combinations (xiaomiio ssec, extension-pragma ssec, mixed tokens)
-        # have been tested and give 401.
-        # Primary: deviceinfo ssecurity (Dalvik UA) + 2FA STS serviceToken.
-        # deviceinfo leads to api.device.xiaomi.net which has no serviceToken cookie,
-        # so _exchange_pass_token returns ssecurity="" service_token="".
-        # Take ssecurity only; keep service_token from 2FA STS (already set above).
-        # miothealth exchange: health-specific ssecurity + serviceToken from sts-hlth.io.mi.com.
-        up_success = False
-        if pass_token_cookie and user_id:
-            fresh = _make_login_session()
-            creds = _exchange_pass_token(fresh, user_id, pass_token_cookie, sid="miothealth")
-            if creds.get("ssecurity") and creds.get("service_token"):
-                ssecurity     = creds["ssecurity"]
-                service_token = creds["service_token"]
-                user_id       = creds.get("user_id", user_id)
-                c_user_id     = creds.get("c_user_id", "") or c_user_id
-                _LOGGER.warning(
-                    "post-2FA miothealth: ssec_len=%d tok_len=%d",
-                    len(ssecurity), len(service_token),
-                )
-                up_success = True
-
-        # Fallback: extension-pragma ssecurity + 2FA STS serviceToken
-        if not up_success and self._ssecurity_2fa and service_token:
-            ssecurity  = self._ssecurity_2fa
-            up_success = True
-            _LOGGER.warning(
-                "post-2FA fallback extension-pragma: ssec_len=%d tok_len=%d",
-                len(ssecurity), len(service_token),
-            )
-
-        ssecurity_reliable = up_success
-        if not up_success:
-            ssecurity = self._ssecurity_2fa
-            _LOGGER.warning(
-                "post-2FA: all paths failed — last resort extension-pragma "
-                "(len=%d), ssecurity_reliable=False",
-                len(ssecurity) if ssecurity else 0,
-            )
-
-        if not ssecurity:
-            raise XiaomiLoginError(
-                "Could not obtain ssecurity after 2FA — "
-                "userprofile, loginStep2, and extension-pragma all failed"
-            )
-
-        return LoginResult(
-            user_id=user_id,
-            c_user_id=c_user_id,
-            ssecurity=ssecurity,
-            service_token=service_token,
-            ssecurity_reliable=ssecurity_reliable,
-            pass_token=pass_token_for_result,
-        )
-
-    # ── SMS 2FA flow (CN accounts) ────────────────────────────────────────────
-
-    def _ticket_form(self, username: str, captcha_code: str = "") -> dict:
-        form: dict = {
-            "sid":     "miothealth",
-            "_json":   "true",
-            "_locale": "zh_CN",
-            "user":    username,
-        }
-        if captcha_code:
-            form["captCode"] = captcha_code
-        return form
-
-    def _post_ticket_endpoint(
-        self, url: str, username: str, captcha_code: str = "", error_prefix: str = ""
-    ) -> dict:
-        """POST a ticket-flow endpoint, normalising captcha risk-control errors."""
-        r = self._session.post(url, data=self._ticket_form(username, captcha_code), timeout=15)
-        data = json.loads(r.text.replace("&&&START&&&", ""))
-        if data.get("code", -1) == 0:
-            return data
-            captcha_url = data.get("captchaUrl", "")
-            if captcha_url:
-                if captcha_url.startswith("/"):
-                    captcha_url = "https://account.xiaomi.com" + captcha_url
-                _LOGGER.warning(
-                    "SMS flow captcha required at %s: %s",
-                    url.rsplit("/", 1)[-1], str(data)[:200],
-                )
-                self._fetch_captcha_bytes(captcha_url)
-                raise XiaomiCaptchaRequired(captcha_url, self._last_sign)
-        raise XiaomiLoginError(
-            f"{error_prefix} (code={data.get('code')}): "
-            f"{data.get('description', data.get('desc', data))}"
-        )
-
-    def _fetch_captcha_bytes(self, captcha_url: str) -> None:
-        """GET the captcha image with THIS session's cookies and cache it.
-
-        The challenge is bound to the session's captchaIck cookie — the fetch
-        must happen at RAISE time. The cached bytes are shown to the user via
-        a data-URL in the config flow: letting the browser fetch the image
-        itself would display a DIFFERENT challenge (no session cookies there),
-        making every correct entry look wrong.
-        """
-        try:
-            r = self._session.get(captcha_url, timeout=10)
-            self._captcha_image_b64 = base64.b64encode(r.content).decode()
-        except Exception as exc:
-            _LOGGER.warning("Could not fetch captcha image: %s", exc)
-
-    def start_sms_verification(
-        self, captcha_code: str = "", captcha_url: str = ""
-    ) -> str:
-        """
-        Send the SMS code to the account's security phone (CN standard channel).
-
-        Steps: (captcha handshake) → preference → phoneInfo (ticketToken)
-        ⇄ sendServiceLoginTicket → fresh _sign with _loginSign=ticket.
-
-        A captcha raised by a previous call is retried by passing the code the
-        user read plus the captcha_url — the code is submitted back to the
-        ENDPOINT THAT ASKED FOR IT (sendTicket/phoneInfo), never to
-        serviceLoginAuth2.
-
-        Returns the masked phone number for display, e.g. "191******54".
-        """
-        if not self._username:
-            raise XiaomiLoginError("No username — call start() first")
-        # 图片已在触发风控应答时随会话取回(_fetch_captcha_bytes),此处不再取。
-
-        def dump(tag: str, data) -> None:
-            _LOGGER.warning("SMS flow %s: %s", tag, str(data)[:400])
-
-        # Normalize the userId cookie: _get_sign() seeds it with the raw
-        # username (often a phone number string). phoneInfo parses that cookie
-        # server-side and answers "系统错误" when it is not a numeric userId.
-        numeric_uid = self._user_id if str(self._user_id).isdigit() else ""
-        if numeric_uid:
-            self._session.cookies.set("userId", numeric_uid)
-        if self._c_user_id_from_login:
-            self._session.cookies.set("cUserId", str(self._c_user_id_from_login))
-
-        # 1) preference — prepare ticket login context
-        r = self._session.get(XIAOMI_PREFERENCE_URL, params={"_locale": "zh_CN"}, timeout=15)
-        pref = json.loads(r.text.replace("&&&START&&&", ""))
-        dump("preference", pref)
-        if pref.get("code", -1) != 0:
-            raise XiaomiLoginError(f"preference failed: {pref.get('description', pref)}")
-
-        phone, ticket_token = "", ""
-
-        # 2) Probe phoneInfo BEFORE sending the SMS — if it works we hold the
-        # ticketToken up front. Failure here is not fatal (SDK order is the
-        # opposite; some flow states only materialise after sendTicket).
-        try:
-            phone, ticket_token = self._phone_info(captcha_code)
-            dump("phoneInfo(A)", {"phone": phone, "ticketToken_len": len(ticket_token)})
-        except XiaomiCaptchaRequired:
-            raise
-        except XiaomiLoginError as exc:
-            dump("phoneInfo(A) failed", str(exc))
-
-        # 3) Send the SMS (captcha risk-control possible)
-        send_data = self._post_ticket_endpoint(
-            XIAOMI_SEND_TICKET_URL, self._username, captcha_code=captcha_code,
-            error_prefix="短信验证码发送失败",
-        )
-        dump("sendTicket", send_data)
-        if not ticket_token:
-            detail = send_data.get("data", {}) or {}
-            ticket_token = detail.get("ticketToken", "") or detail.get("ticket_token", "")
-            if ticket_token:
-                dump("ticketToken from sendTicket", {"len": len(ticket_token)})
-
-        # 4) Still no ticketToken → SDK order with retries (each attempt now
-        # covers several request variants — see _phone_info).
-        if not ticket_token:
-            last_err: Exception | None = None
-            for attempt in range(1, 3):
-                try:
-                    phone, ticket_token = self._phone_info(captcha_code)
-                    dump(
-                        f"phoneInfo(B{attempt})",
-                        {"phone": phone, "ticketToken_len": len(ticket_token)},
-                    )
-                    break
-                except XiaomiCaptchaRequired:
-                    raise
-                except XiaomiLoginError as exc:
-                    last_err = exc
-                    dump(f"phoneInfo(B{attempt}) failed", str(exc))
-                    time.sleep(2)
-            if not ticket_token:
-                # 已确认短信发出 —— ticketToken 缺失不再阻断流程:直接进验证码
-                # 表单提交一次,serviceLoginTicketAuth 的原始响应会进日志,
-                # 据此可判断该端点是否强依赖 ticketToken。
-                _LOGGER.warning(
-                    "SMS flow: phoneInfo 始终未返回 ticketToken(%s)— "
-                    "跳过该令牌直接提交验证码", last_err,
-                )
-
-        if ticket_token:
-            self._session.cookies.set("ticketToken", ticket_token)
-
-        # 5) Fresh _sign for ticket login
-        self._ticket_sign, self._ticket_callback = _get_sign(
-            self._session, self._username, login_sign="ticket"
-        )
-        return phone or "(未获取)"
-
-    def _phone_info(self, captcha_code: str = "") -> tuple[str, str]:
-        """POST/GET /pass/phoneInfo → (masked phone, ticketToken).
-
-        The endpoint is picky about session shape (returns 10001 "系统错误"
-        for some sessions). Try several request variants and keep the first
-        that yields a ticketToken.
-        """
-        errors: list[str] = []
-
-        def _parse(resp_text: str, label: str) -> tuple[str, str] | None:
-            data = json.loads(resp_text.replace("&&&START&&&", ""))
-            _LOGGER.warning("SMS flow phoneInfo[%s]: %s", label, str(data)[:300])
-            captcha_url = data.get("captchaUrl") or ""
-            if data.get("code", -1) != 0 and captcha_url:
-                if captcha_url.startswith("/"):
-                    captcha_url = "https://account.xiaomi.com" + captcha_url
-                self._fetch_captcha_bytes(captcha_url)
-                raise XiaomiCaptchaRequired(captcha_url, self._last_sign)
-            if data.get("code", -1) != 0:
-                errors.append(
-                    f"[{label}] code={data.get('code')} "
-                    f"{data.get('description', data.get('desc', ''))}"
-                )
-                return None
-            detail = data.get("data", {}) or {}
-            token = detail.get("ticketToken", "")
-            if not token:
-                errors.append(f"[{label}] 无 ticketToken: {str(data)[:150]}")
-                return None
-            return detail.get("phone", ""), token
-
-        # 变体1:标准 POST(SDK 同款)
-        try:
-            r = self._session.post(
-                XIAOMI_PHONE_INFO_URL,
-                data=self._ticket_form(self._username, captcha_code),
-                timeout=15,
-            )
-            got = _parse(r.text, "POST")
-            if got:
-                return got
-        except XiaomiCaptchaRequired:
-            raise
-        except Exception as exc:
-            errors.append(f"[POST] {exc}")
-
-        # 变体2:去掉 sdkVersion cookie 再 POST(cookie 版本可能触发 10001)
-        saved_sdkv = [
-            (c.domain, c.path, c.value)
-            for c in list(self._session.cookies)
-            if c.name == "sdkVersion"
-        ]
-        if saved_sdkv:
-            for domain, path, _val in saved_sdkv:
-                self._session.cookies.clear(domain, path, "sdkVersion")
-            try:
-                r = self._session.post(
-                    XIAOMI_PHONE_INFO_URL,
-                    data=self._ticket_form(self._username, captcha_code),
-                    timeout=15,
-                )
-                got = _parse(r.text, "POST-nosdk")
-                if got:
-                    return got
-            except XiaomiCaptchaRequired:
-                raise
-            except Exception as exc:
-                errors.append(f"[POST-nosdk] {exc}")
-            finally:
-                for domain, path, val in saved_sdkv:
-                    self._session.cookies.set("sdkVersion", val, domain=domain, path=path)
-
-        # 变体3:GET 方式
-        try:
-            r = self._session.get(
-                XIAOMI_PHONE_INFO_URL,
-                params={"sid": "miothealth", "_json": "true",
-                        "_locale": "zh_CN", "user": self._username},
-                timeout=15,
-            )
-            got = _parse(r.text, "GET")
-            if got:
-                return got
-        except XiaomiCaptchaRequired:
-            raise
-        except Exception as exc:
-            errors.append(f"[GET] {exc}")
-
-        raise XiaomiLoginError("phoneInfo 全部请求变体失败: " + " | ".join(errors))
-
-    def verify_with_sms(self, sms_code: str) -> "LoginResult":
-        """Submit the SMS code via serviceLoginTicketAuth → full credentials."""
-        if not getattr(self, "_ticket_sign", ""):
-            raise XiaomiLoginError("No ticket context — call start_sms_verification() first")
-
-        post = {
-            "sid":      "miothealth",
-            "_json":    "true",
-            "_sign":    self._ticket_sign,
-            "callback": "https://sts-hlth.io.mi.com/healthapp/sts",
-            "ticket":   sms_code.strip(),
-            # 服务端靠 user/ticketToken 定位手机号:没有 ticketToken cookie 时
-            # (phoneInfo 被风控),缺 user 会报 code=70009 "电话号码为空"。
-            "user":     self._username,
-            "qs":       "%3F_loginSign%3Dticket%26_json%3Dtrue%26sid%3Dmiothealth%26_locale%3Dzh_CN",
-            "_locale":  "zh_CN",
-        }
-        r = self._session.post(
-            XIAOMI_TICKET_AUTH_URL,
-            data=post,
-            headers={"Referer": XIAOMI_LOGIN_URL},
-            timeout=15,
-        )
-        _LOGGER.warning(
-            "SMS flow ticketAuth(ticketToken cookie %s): %s",
-            "present" if self._session.cookies.get("ticketToken") else "ABSENT",
-            r.text[:300],
-        )
-        data = json.loads(r.text.replace("&&&START&&&", ""))
-        code = data.get("code", -1)
-        if code != 0:
-            raise XiaomiLoginError(f"短信验证码验证失败 (code={code}): {data.get('desc', '')}")
-        if not data.get("ssecurity"):
-            raise XiaomiLoginError("验证通过但未返回 ssecurity")
-
-        service_token = _get_service_token(self._session, data["location"])
-        pass_token = data.get("passToken", "") or next(
-            (c.value for c in self._session.cookies if c.name == "passToken"), ""
-        )
-        return LoginResult(
-            user_id=str(data.get("userId", "")),
-            c_user_id=data.get("cUserId", ""),
-            ssecurity=data["ssecurity"],
-            service_token=service_token,
-            pass_token=pass_token,
-        )
-
-    # ── internal ──────────────────────────────────────────────────────────────
-
-    def _attempt(self, captcha_code: str) -> "LoginResult":
-        data = _post_credentials(
-            self._session,
-            self._username,
-            self._password,
-            self._last_sign,
-            captcha_code=captcha_code,
-        )
-        code   = data.get("code", -1)
-        result = data.get("result", "")
-
-        _LOGGER.debug("Login attempt: code=%s result=%s", code, result)
-
-        # ── captcha ──────────────────────────────────────────────────────────
-        if code == 87001 and data.get("captchaUrl"):
-            captcha_url = "https://account.xiaomi.com" + data["captchaUrl"]
-            # MUST fetch the captcha image so the server sets captchaIck cookie
-            # in this session.  Without this GET the POST with captCode is
-            # rejected as "Wrong captcha" even when the text is correct.
-            # The bytes are cached for display via data-URL in the config flow.
-            self._fetch_captcha_bytes(captcha_url)
-            # Do NOT call _get_sign here — captcha challenge is tied to the
-            # current session + sign that triggered it.  Calling serviceLogin
-            # again would start a new server session, invalidating captchaIck
-            # and causing every captcha submission to be rejected as "wrong".
-            raise XiaomiCaptchaRequired(captcha_url, self._last_sign)
-
-        # ── SMS verification required (CN accounts: device untrusted) ─────────
-        # code 70016 = ERR_DEVICE_UNTRUST; securityStatus != 0 has the same
-        # meaning. These were previously misclassified as "invalid credentials".
-        if code == 70016 or data.get("securityStatus", 0):
-            self._user_id = str(data.get("userId", self._username))
-            self._pass_token = data.get("passToken", "") or next(
-                (c.value for c in self._session.cookies if c.name == "passToken"), ""
-            )
-            self._ssecurity_from_login = data.get("ssecurity", "")
-            self._c_user_id_from_login = data.get("cUserId", "") or next(
-                (c.value for c in self._session.cookies if c.name == "cUserId"), ""
-            )
-            raise XiaomiSmsRequired(
-                f"SMS verification required (code={code}, "
-                f"securityStatus={data.get('securityStatus', 0)})"
-            )
-
-        # ── identity verification required ───────────────────────────────────
-        if data.get("notificationUrl") and not data.get("location"):
-            self._user_id          = str(data.get("userId", self._username))
-            self._notification_url = data["notificationUrl"]
-            # passToken: try JSON body first, fall back to Set-Cookie header
-            self._pass_token = data.get("passToken", "") or next(
-                (c.value for c in self._session.cookies if c.name == "passToken"), ""
-            )
-            # ssecurity may be included even when 2FA is required — save it as the
-            # canonical account ssecurity (more reliable than extension-pragma).
-            self._ssecurity_from_login = data.get("ssecurity", "")
-            self._c_user_id_from_login = data.get("cUserId", "") or next(
-                (c.value for c in self._session.cookies if c.name == "cUserId"), ""
-            )
-            _LOGGER.warning(
-                "2FA triggered: ssecurity_from_login_present=%s  "
-                "ssecurity_len=%d  passToken_len=%d  userId=%s  cUserId=%s",
-                bool(self._ssecurity_from_login),
-                len(self._ssecurity_from_login),
-                len(self._pass_token),
-                self._user_id,
-                self._c_user_id_from_login,
-            )
-            # Parse context parameter — required for /identity/* endpoints
-            try:
-                qs = parse_qs(urlparse(self._notification_url).query)
-                self._context = qs.get("context", [""])[0]
-            except Exception:
-                self._context = ""
-            _LOGGER.debug(
-                "notificationUrl received. context_present=%s  userId=%s",
-                bool(self._context), self._user_id,
-            )
-            raise XiaomiApprovalRequired(
-                data["notificationUrl"],
-                self._last_sign,
-            )
-
-        # ── wrong credentials ─────────────────────────────────────────────────
-        if result != "ok" or not data.get("location"):
-            # 70016 is handled above (SMS verification), 87001 by the captcha
-            # branch — what remains here is a genuine credential rejection.
-            if code in (70017, 82001):
-                raise XiaomiInvalidCredentials(f"Login rejected: code={code}")
-            raise XiaomiLoginError(f"Login failed: code={code} result={result}")
-
-        # ── success ───────────────────────────────────────────────────────────
-        ssecurity     = data["ssecurity"]
-        user_id       = str(data["userId"])
-        c_user_id     = data.get("cUserId", "")
-        service_token = _get_service_token(self._session, data["location"])
-
-        return LoginResult(
-            user_id=user_id,
-            c_user_id=c_user_id,
-            ssecurity=ssecurity,
-            service_token=service_token,
-        )
 
 
 class LoginResult:
@@ -1167,26 +56,205 @@ class LoginResult:
         c_user_id: str,
         ssecurity: str,
         service_token: str,
-        ssecurity_reliable: bool = True,
         pass_token: str = "",
     ) -> None:
-        self.user_id            = user_id
-        self.c_user_id          = c_user_id
-        self.ssecurity          = ssecurity
-        self.service_token      = service_token
-        # False when ssecurity came from extension-pragma (session-specific,
-        # not the stable account-level key). In re-auth, the existing stored
-        # ssecurity should be kept instead of overwriting with this value.
-        self.ssecurity_reliable = ssecurity_reliable
-        # passToken — longer-lived than serviceToken, used for silent re-auth
-        # (GET serviceLoginAuth2 with passToken bypasses 2FA since token was
-        # already issued after a completed 2FA session).
-        self.pass_token         = pass_token
+        self.user_id        = user_id
+        self.c_user_id     = c_user_id
+        self.ssecurity     = ssecurity
+        self.service_token = service_token
+        # passToken —— 比 serviceToken 长寿,用于过期后静默续期
+        self.pass_token    = pass_token
 
-    def to_dict(self) -> dict:
+
+def parse_mi_response(text: str) -> dict:
+    """解析小米 API 带 &&&START&&& 前缀的 JSON 响应。"""
+    body = text
+    if body.startswith("&&&START&&&"):
+        body = body[len("&&&START&&&"):]
+    return json.loads(body)
+
+
+def make_login_session() -> requests.Session:
+    dev_hex = "".join(random.choices("0123456789abcdef", k=32))
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent":   _UA_LOGIN,
+        "Content-Type": "application/x-www-form-urlencoded",
+    })
+    s.cookies.update({"sdkVersion": "3.8.6", "deviceId": f"an_{dev_hex}"})
+    return s
+
+
+def _get_service_token(session: requests.Session, location: str) -> str:
+    """跟随 STS 重定向,从响应 cookie(或重定向查询参数)提取 serviceToken。"""
+    r = session.get(location, timeout=15)
+    token = r.cookies.get("serviceToken")
+    if not token:
+        token = session.cookies.get("serviceToken", "")
+    if not token:
+        try:
+            qs = parse_qs(urlparse(r.url).query)
+            token = qs.get("serviceToken", [""])[0]
+        except Exception:
+            token = ""
+    if not token:
+        raise XiaomiLoginError("未能从 STS 重定向获取 serviceToken")
+    return token
+
+
+class XiaomiLoginSession:
+    """一次浏览器链接登录会话:qr_login_start() 取链接,qr_login_poll() 等确认。"""
+
+    def __init__(self) -> None:
+        self._session        = make_login_session()
+        self._lp_url         = ""
+        self._deadline       = 0.0
+        self.login_url       = ""
+        self.qr_image_b64    = ""
+        self.timeout_seconds = _MAX_POLL_SECONDS
+
+    def qr_login_start(self) -> dict:
+        """申请登录链接与二维码。返回 {login_url, qr_image_b64, timeout}。"""
+        r = self._session.get(QR_LOGIN_URL, params={
+            "_qrsize": "480",
+            "qs": f"%3Fsid%3D{SID}%26_json%3Dtrue",
+            "callback": STS_HEALTH_URL,
+            "_hasLogo": "false",
+            "sid": SID,
+            "serviceParam": "",
+            "_locale": "zh_CN",
+            "_dc": str(int(time.time() * 1000)),
+        }, timeout=15)
+        qr = parse_mi_response(r.text)
+        login_url = qr.get("loginUrl", "")
+        lp = qr.get("lp", "")
+        if not login_url or not lp:
+            raise XiaomiLoginError(f"获取登录链接失败: {str(qr)[:200]}")
+
+        self.login_url = login_url
+        self._lp_url   = lp
+        timeout = min(float(qr.get("timeout", _MAX_POLL_SECONDS)), _MAX_POLL_SECONDS)
+        self.timeout_seconds = timeout
+        self._deadline = time.time() + timeout
+
+        # 二维码图片随会话取回(base64 内嵌展示;手机扫码是可选捷径)
+        try:
+            qr_img = qr.get("qr", "")
+            if qr_img:
+                img = self._session.get(qr_img, timeout=10)
+                self.qr_image_b64 = base64.b64encode(img.content).decode()
+        except Exception as exc:
+            _LOGGER.warning("二维码图片取回失败(不影响链接登录): %s", exc)
+
         return {
-            "user_id":       self.user_id,
-            "c_user_id":     self.c_user_id,
-            "ssecurity":     self.ssecurity,
-            "service_token": self.service_token,
+            "login_url":    login_url,
+            "qr_image_b64": self.qr_image_b64,
+            "timeout":      timeout,
         }
+
+    def qr_login_poll(self) -> LoginResult:
+        """长轮询等待用户在浏览器完成登录。成功返回完整凭证。"""
+        if not self._lp_url:
+            raise XiaomiLoginError("请先调用 qr_login_start()")
+
+        while time.time() < self._deadline:
+            try:
+                r = self._session.get(self._lp_url, timeout=65)
+            except requests.Timeout:
+                continue
+            except requests.RequestException as exc:
+                _LOGGER.warning("登录轮询网络错误,重试: %s", exc)
+                time.sleep(2)
+                continue
+            if r.status_code != 200:
+                time.sleep(2)
+                continue
+            try:
+                data = parse_mi_response(r.text)
+            except Exception:
+                time.sleep(2)
+                continue
+            if not data.get("ssecurity"):
+                _LOGGER.debug("登录轮询等待中: %s", r.text[:120])
+                time.sleep(2)
+                continue
+
+            # 登录成功 —— 提取凭证 + 跟随 location 拿 serviceToken
+            location = data.get("location", "")
+            return LoginResult(
+                user_id=str(data.get("userId", "")),
+                c_user_id=data.get("cUserId", ""),
+                ssecurity=data["ssecurity"],
+                service_token=(
+                    _get_service_token(self._session, location) if location else ""
+                ),
+                pass_token=data.get("passToken", ""),
+            )
+
+        raise XiaomiLoginError("登录链接已过期,请重新发起登录")
+
+
+# ── passToken 静默续期(serviceToken 过期时 coordinator 调用)────────────────
+
+def _exchange_pass_token(
+    session: requests.Session,
+    user_id: str,
+    pass_token: str,
+    sid: str = SID,
+) -> dict:
+    """passToken cookie 换 ssecurity + location → serviceToken。免 2FA。"""
+    session.cookies.set("passToken", pass_token, domain="account.xiaomi.com")
+    session.cookies.set("userId",    user_id,    domain="account.xiaomi.com")
+
+    try:
+        r = session.get(
+            XIAOMI_LOGIN_URL,
+            params={"_json": "true", "sid": sid, "_locale": "zh_CN"},
+            timeout=15,
+        )
+        data = parse_mi_response(r.text)
+        ssec = data.get("ssecurity", "")
+        if data.get("code", -1) != 0 or not ssec:
+            _LOGGER.warning(
+                "passToken 续期: serviceLogin 未返回凭证 code=%s", data.get("code")
+            )
+            return {}
+        location = data.get("location", "")
+        result = {
+            "ssecurity":     ssec,
+            "service_token": "",
+            "user_id":       str(data.get("userId", user_id)),
+            "c_user_id":     data.get("cUserId", ""),
+            "pass_token":    data.get("passToken", pass_token),
+        }
+        if location:
+            try:
+                result["service_token"] = _get_service_token(session, location)
+            except Exception as sts_exc:
+                _LOGGER.warning("passToken 续期: STS 失败: %s", sts_exc)
+        return result
+    except Exception as exc:
+        _LOGGER.warning("passToken 续期异常: %s", exc)
+    return {}
+
+
+def try_silent_token_refresh(pass_token: str, user_id: str) -> dict:
+    """用 passToken 静默换取新的 ssecurity + serviceToken。失败返回空 dict。"""
+    if not pass_token or not user_id:
+        return {}
+    session = make_login_session()
+    creds = _exchange_pass_token(session, user_id, pass_token, sid=SID)
+    if creds.get("ssecurity") and creds.get("service_token"):
+        _LOGGER.info(
+            "passToken 静默续期成功: ssec_len=%d tok_len=%d",
+            len(creds["ssecurity"]), len(creds["service_token"]),
+        )
+        return {
+            "ssecurity":     creds["ssecurity"],
+            "service_token": creds["service_token"],
+            "user_id":       creds.get("user_id", user_id),
+            "c_user_id":     creds.get("c_user_id", ""),
+            "pass_token":    pass_token,  # 保留原 passToken,不做轮换
+        }
+    _LOGGER.warning("passToken 静默续期失败(可能已过期,需重新走浏览器登录)")
+    return {}

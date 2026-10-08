@@ -156,11 +156,11 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="stand_hours_today",
-        name="今日站立小时",
+        name="今日静止/久坐时长",
         data_key="stand_hours_today",
         native_unit_of_measurement="h",
         state_class=SensorStateClass.TOTAL_INCREASING,
-        icon="mdi:human-handsup",
+        icon="mdi:sofa",
     ),
     MiFitnessSensorDescription(
         key="vitality_high",

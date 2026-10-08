@@ -121,7 +121,7 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
     ),
     MiFitnessSensorDescription(
         key="sleep_rem",
-        name="REM 睡眠时长",
+        name="快速眼动时长",
         data_key="sleep_rem",
         native_unit_of_measurement=UnitOfTime.MINUTES,
         device_class=SensorDeviceClass.DURATION,
@@ -325,9 +325,21 @@ class MiFitnessSensor(CoordinatorEntity[MiFitnessCoordinator], SensorEntity):
             attrs["quality"]       = data.get("sleep_quality")
             attrs["efficiency"]    = data.get("sleep_efficiency")
             attrs["chronotype"]    = data.get("sleep_chronotype")
+            # 分段条 UI 的单实体数据源:各阶段分钟数直接挂属性
+            attrs["deep_minutes"]  = data.get("sleep_deep")
+            attrs["light_minutes"] = data.get("sleep_light")
+            attrs["rem_minutes"]   = data.get("sleep_rem")
             stages = data.get("sleep_stages")
             if stages:
                 attrs["stages"] = stages
+            # 历史夜分段(压缩 [start,end,state] 三元组),按日期
+            stages_hist = {
+                h["date"]: h["stages"]
+                for h in (data.get("sleep_history_14d") or [])
+                if h.get("stages")
+            }
+            if stages_hist:
+                attrs["stages_history"] = stages_hist
             history = data.get("sleep_history_14d")
             if history:
                 attrs["history_14d"] = history

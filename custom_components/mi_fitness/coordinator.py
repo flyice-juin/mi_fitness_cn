@@ -206,6 +206,10 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
         self._day_num: int = 0      # calendar day when _day_wm was recorded
         self._sensor_data: dict[str, Any] = {}
         self._sleep_history: dict[str, dict] = {}
+        # 睡眠分段 timeline 按 bedtime 键存(bedtime → [{start,end,state,label}])。
+        # 原始流里带分段的 sleep 项窗口很短(只有最近一两晚),错过水位就再也
+        # 拿不到,所以拿到就落库存起来;日汇总合成的记录没有分段,从这里回填。
+        self._sleep_stages: dict[int, list] = {}
         self._steps_history: dict[str, dict] = {}
         # Per-day step records keyed by timestamp: {date_str: {ts: {...}}}.
         # The server re-sends the same interval with a new watermark as data
@@ -228,13 +232,18 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
             self._day_wm        = stored.get("day_wm", 0)
             self._day_num       = stored.get("day_num", 0)
             self._sleep_history = stored.get("sleep_history", {})
+            self._sleep_stages = {
+                int(k): v for k, v in (stored.get("sleep_stages") or {}).items()
+            }
             self._steps_history = stored.get("steps_history", {})
             self._step_buckets  = stored.get("step_buckets", {})
             self._sensor_data   = stored.get("sensor_data", {})
-            # On restart roll back to start-of-today so we re-fetch today's data.
-            # (watermark sits at end-of-data; day_wm is start-of-today.)
-            if self._day_wm:
-                self._watermark = self._day_wm
+            # 重启后从 0 全量重走当前数据窗口(通常只有几页):原始流是短窗口
+            # 馈送,带分段 timeline 的 sleep 项错过水位就永久丢失;全量重走
+            # 让分段等短窗口数据自愈。幂等性:步数按 ts 去重替换、心率按 ts
+            # 单调、睡眠按 bedtime 判重 —— 重放不会重复计数。
+            if self._watermark:
+                self._watermark = 0
                 # Clear today's step totals — they'll be rebuilt from re-fetched records.
                 # (Avoids double-counting since we accumulate into _steps_history.)
                 today_str = datetime.now().strftime("%Y-%m-%d")
@@ -379,6 +388,7 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
                 "day_wm":          self._day_wm,
                 "day_num":         self._day_num,
                 "sleep_history":   self._sleep_history,
+                "sleep_stages":    self._sleep_stages,
                 "steps_history":   self._steps_history,
                 "step_buckets":    self._step_buckets,
                 "sensor_data":     self._sensor_data,
@@ -511,6 +521,21 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
             if c["avg_spo2"] and c["ts"] > self._sensor_data.get("spo2_ts", 0):
                 self._sensor_data["spo2"]    = c["avg_spo2"]
                 self._sensor_data["spo2_ts"] = c["ts"]
+            # 历史夜(bedtime 没超过当前记录,_process_sleep 会跳过)也要把
+            # 日汇总刷新进 14 天历史 —— 否则 UI 的多夜分段条永远只有最新一晚
+            if bedtime < self._sensor_data.get("sleep_bedtime", 0):
+                time_in_bed = (c["wake_up_time"] - bedtime) / 60 if c["wake_up_time"] > bedtime else c["duration"]
+                self._upsert_sleep_history(
+                    bedtime,
+                    c["wake_up_time"],
+                    c["duration"],
+                    c["deep"], c["light"], c["rem"],
+                    c["awake_count"],
+                    c["score"] or _sleep_quality_score(c["duration"], c["deep"], c["rem"], c["awake_count"]),
+                    round(c["duration"] / time_in_bed * 100) if time_in_bed > 0 else 0,
+                    self._sleep_stages.get(bedtime, []),
+                )
+        self._sensor_data["sleep_history_14d"] = self._build_sleep_history_list()
 
     def _merge_items(self, items: list[dict]) -> None:
         """Merge new data_list items into aggregated sensor state."""
@@ -579,7 +604,27 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
 
             # ── Sleep ─────────────────────────────────────────────────────
             elif key == KEY_SLEEP:
-                if ts >= recent_cutoff:
+                if ts >= recent_cutoff and isinstance(val, dict):
+                    # 带分段 timeline 的原始项:先落分段库。日汇总合成的记录
+                    # 没有分段且往往先到(_process_sleep 会因 bedtime 相同
+                    # 跳过这里),所以同 bedtime 时把分段直接补挂到当前记录。
+                    bedtime = val.get("bedtime", 0)
+                    stages_raw = val.get("items") or []
+                    if bedtime and stages_raw:
+                        stages = _stages_to_list(stages_raw)
+                        self._sleep_stages[bedtime] = stages
+                        if (
+                            self._sensor_data.get("sleep_bedtime") == bedtime
+                            and not self._sensor_data.get("sleep_stages")
+                        ):
+                            self._sensor_data["sleep_stages"] = stages
+                            # 判重会跳过 _process_sleep 的历史重建,这里同步补
+                            date_str = datetime.fromtimestamp(bedtime).strftime("%Y-%m-%d")
+                            hist = self._sleep_history.get(date_str)
+                            if hist is not None and not hist.get("stages"):
+                                hist["stages"] = [
+                                    [s["start"], s["end"], s["state"]] for s in stages
+                                ]
                     self._process_sleep(val, ts)
 
             # ── Calories ──────────────────────────────────────────────────
@@ -713,7 +758,8 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
         stages_raw  = val.get("items", [])
 
         quality    = _sleep_quality_score(duration, deep, rem, awake_count)
-        stages     = _stages_to_list(stages_raw) if stages_raw else []
+        # 分段优先取本条自带(原始项);日汇总合成条目没有分段,从分段库回填
+        stages     = _stages_to_list(stages_raw) if stages_raw else self._sleep_stages.get(bedtime, [])
         time_in_bed = (wakeup - bedtime) / 60 if wakeup > bedtime else duration
         efficiency  = round(duration / time_in_bed * 100) if time_in_bed > 0 else 0
 
@@ -735,8 +781,44 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
         })
 
         # Update 14-day history dict (keyed by local date of bedtime)
+        self._upsert_sleep_history(
+            bedtime, wakeup, duration, deep, light, rem, awake_count, quality, efficiency, stages,
+        )
+
+        # Prune to 14 days
+        cutoff = datetime.now().strftime("%Y-%m-%d")
+        cutoff_dt = datetime.now() - timedelta(days=14)
+        cutoff_str = cutoff_dt.strftime("%Y-%m-%d")
+        self._sleep_history = {
+            k: v for k, v in self._sleep_history.items() if k >= cutoff_str
+        }
+        stage_cutoff = int(time.time()) - 14 * 86400
+        self._sleep_stages = {
+            k: v for k, v in self._sleep_stages.items() if k >= stage_cutoff
+        }
+
+    def _upsert_sleep_history(
+        self,
+        bedtime: int,
+        wakeup: int,
+        duration: int,
+        deep: int,
+        light: int,
+        rem: int,
+        awake_count: int,
+        quality: int,
+        efficiency: int,
+        stages: list[dict],
+    ) -> None:
+        """Insert/refresh one night's entry in the 14-day sleep history.
+
+        Both the newest night (_process_sleep) and older nights (daily_report
+        re-delivery) funnel here. 分段只在有新值时覆盖,否则保留已有 —— 原始流
+        分段项是短窗口,过期后日汇总重投不能把它冲掉。
+        """
         date_str = datetime.fromtimestamp(bedtime).strftime("%Y-%m-%d")
-        self._sleep_history[date_str] = {
+        prev = self._sleep_history.get(date_str) or {}
+        entry = {
             "date":        date_str,
             "bedtime":     bedtime,
             "wakeup":      wakeup,
@@ -748,14 +830,13 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
             "quality":     quality,
             "efficiency":  efficiency,
         }
-
-        # Prune to 14 days
-        cutoff = datetime.now().strftime("%Y-%m-%d")
-        cutoff_dt = datetime.now() - timedelta(days=14)
-        cutoff_str = cutoff_dt.strftime("%Y-%m-%d")
-        self._sleep_history = {
-            k: v for k, v in self._sleep_history.items() if k >= cutoff_str
-        }
+        # 分段跟着历史走(压缩成 [start,end,state] 三元组,14 晚不至于把
+        # 属性撑爆):UI 拿它画每夜的横向 bar
+        if stages:
+            entry["stages"] = [[s["start"], s["end"], s["state"]] for s in stages]
+        elif prev.get("stages"):
+            entry["stages"] = prev["stages"]
+        self._sleep_history[date_str] = entry
 
     def _build_sleep_history_list(self) -> list[dict]:
         """Return sleep history sorted newest-first (max 14 entries)."""

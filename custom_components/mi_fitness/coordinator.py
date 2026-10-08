@@ -24,6 +24,7 @@ from .const import (
     DOMAIN,
     KEY_CALORIES,
     KEY_HEART_RATE,
+    KEY_INTENSITY,
     KEY_RESTING_HEART_RATE,
     KEY_SLEEP,
     KEY_SPO2,
@@ -42,6 +43,10 @@ SCAN_INTERVAL = timedelta(minutes=SCAN_INTERVAL_MINUTES)
 
 # Sleep stage state codes from the API
 _SLEEP_STATE_NAMES = {2: "light", 3: "deep", 4: "rem", 5: "awake"}
+
+# 活动建议类型（vitality.suggested_activity_type）。1=散步 是按 Mi Fitness
+# 活动建议卡行为反推的映射,其余值未观测到,原样显示「类型 N」并带原始码属性。
+_ACTIVITY_TYPES = {1: "散步"}
 
 
 def _day_start_ts() -> int:
@@ -470,6 +475,12 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
                 if today <= ts < tomorrow and val.get("calories") is not None:
                     self._sensor_data["calories_today"] = val["calories"]
 
+            # ── 活动强度日汇总(今日中高强度活动分钟数,锻炼/骑行的核心读数)──
+            elif key == "intensity":
+                if today <= ts < tomorrow and val.get("duration") is not None:
+                    prev = self._sensor_data.get("activity_duration_today") or 0
+                    self._sensor_data["activity_duration_today"] = max(prev, val["duration"])
+
             # ── 睡眠日汇总(含平均血氧)────────────────────────────────────
             elif key == "sleep":
                 segs = [
@@ -554,6 +565,9 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
         calories_today: list[dict] = []
         hr_readings: list[dict] = []
         stand_hours_today_set: set[int] = set()
+        # 中高强度活动的逐分钟桶(intensity 原始项 = 每分钟一条):今日活动
+        # 时长的兜底口径(daily_report 的 duration 缺席时用它数分钟)
+        intensity_minutes: set[int] = set()
 
         for item in items:
             key = item.get("key", "")
@@ -656,17 +670,34 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
             elif key == KEY_VITALITY:
                 if ts < recent_cutoff:
                     continue
+                # 判重必须用 update_time(服务器原地更新当日项时 time 恒为当日
+                # 08:00,用 time 判重会把同一天的数据更新全部丢掉——活力恒 0
+                # 的根因,骑行后的中强度分钟数就是这么丢的)
+                ut = item.get("update_time") or ts
                 prev_day = self._sensor_data.get("vitality_ts", 0)
-                if ts > prev_day and isinstance(val, dict):
+                if ut > prev_day and isinstance(val, dict):
                     self._sensor_data["vitality_high"]   = val.get("daily_high_intensity_vitality", 0)
                     self._sensor_data["vitality_medium"] = val.get("daily_medium_intensity_vitality", 0)
                     self._sensor_data["vitality_low"]    = val.get("daily_low_intensity_vitality", 0)
-                    self._sensor_data["vitality_ts"]     = ts
+                    self._sensor_data["vitality_ts"]     = ut
+                # 活动建议(类型+建议时长):不判新旧,取最新 update_time 的值
+                sat = val.get("suggested_activity_type")
+                if sat is not None:
+                    self._sensor_data["suggested_activity_type"] = sat
+                    self._sensor_data["suggested_activity"] = _ACTIVITY_TYPES.get(sat, f"类型 {sat}")
+                sdur = val.get("suggested_activity_duration")
+                if sdur is not None:
+                    self._sensor_data["suggested_activity_duration"] = sdur
 
             # ── Valid stand ───────────────────────────────────────────────
             elif key == KEY_VALID_STAND:
                 if today <= ts < tomorrow:
                     stand_hours_today_set.add(datetime.fromtimestamp(ts).hour)
+
+            # ── Intensity 逐分钟桶(该分钟有中高强度活动)──────────────────
+            elif key == KEY_INTENSITY:
+                if today <= ts < tomorrow:
+                    intensity_minutes.add(ts // 60)
 
         # Steps: rebuild day totals from deduped buckets (sum of unique-ts values)
         if touched_step_dates:
@@ -724,6 +755,11 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
             merged   = sorted(prev_set | stand_hours_today_set)
             self._sensor_data["stand_hours_list"]  = merged
             self._sensor_data["stand_hours_today"] = len(merged)
+
+        # 活动时长兜底口径:逐分钟桶数与日汇总取大(两者都只增不减,再大者胜)
+        if intensity_minutes:
+            cur = self._sensor_data.get("activity_duration_today") or 0
+            self._sensor_data["activity_duration_today"] = max(cur, len(intensity_minutes))
 
         # Rebuild history + compute chronotype from full history (not single night)
         history_list = self._build_sleep_history_list()

@@ -155,6 +155,20 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
         icon="mdi:water-percent",
     ),
     MiFitnessSensorDescription(
+        key="activity_duration_today",
+        name="今日活动时长",
+        data_key="activity_duration_today",
+        native_unit_of_measurement="min",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:run",
+    ),
+    MiFitnessSensorDescription(
+        key="suggested_activity",
+        name="建议活动",
+        data_key="suggested_activity",
+        icon="mdi:lightbulb-on",
+    ),
+    MiFitnessSensorDescription(
         key="stand_hours_today",
         name="今日静止/久坐时长",
         data_key="stand_hours_today",
@@ -377,6 +391,12 @@ class MiFitnessSensor(CoordinatorEntity[MiFitnessCoordinator], SensorEntity):
             hours_list = data.get("stand_hours_list")
             if hours_list:
                 attrs["hours_list"] = hours_list
+
+        elif key == "suggested_activity":
+            attrs["activity_type"] = data.get("suggested_activity_type")
+            dur = data.get("suggested_activity_duration")
+            if dur is not None:
+                attrs["suggested_minutes"] = dur
 
         elif key == "weight":
             ts = data.get("weight_ts")

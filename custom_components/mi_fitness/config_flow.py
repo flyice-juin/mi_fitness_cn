@@ -123,7 +123,7 @@ class MiFitnessConfigFlow(ConfigFlow, domain=DOMAIN):
                 return self._show_browser_form(errors={"base": "link_start_failed"})
             self._qr_task = self.hass.async_create_task(self._qr_poll_loop())
 
-        # 用户手动点了「提交」(检查登录状态)
+        # 用户点了「我已完成登录」→ 转入进度页(前端自动轮询,完成后自动继续)
         if user_input is not None and self._qr_task is not None:
             if self._qr_task.done():
                 if self._qr_error is not None:
@@ -131,10 +131,31 @@ class MiFitnessConfigFlow(ConfigFlow, domain=DOMAIN):
                     self._reset_login()
                     self._status_note = f"{note};已生成新的登录链接,请重新完成登录"
                     return await self.async_step_browser_login()
-            else:
-                errors["base"] = "login_not_detected"
+                return await self._finish_login(self._qr_result)
+            return self.async_show_progress(
+                step_id="wait_login",
+                progress_action="wait_login",
+                progress_task=self._qr_task,
+                description_placeholders={
+                    "login_url": self._login_info.get("login_url", ""),
+                },
+            )
 
         return self._show_browser_form(errors=errors)
+
+    async def async_step_wait_login(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """进度页:登录任务完成后由前端推进到这里。"""
+        if self._qr_result is not None:
+            return await self._finish_login(self._qr_result)
+        if self._qr_error is not None:
+            note = str(self._qr_error)
+            self._reset_login()
+            self._status_note = f"{note};已生成新的登录链接,请重新完成登录"
+            return await self.async_step_browser_login()
+        # 兜底:任务未完成(理论上不可达)——回登录表单
+        return await self.async_step_browser_login()
 
     def _show_browser_form(self, errors: dict[str, str] | None = None) -> ConfigFlowResult:
         info = self._login_info or {}

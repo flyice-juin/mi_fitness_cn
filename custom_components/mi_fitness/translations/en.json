@@ -9,19 +9,21 @@
       },
       "browser_login": {
         "title": "小米运动健康 — Browser Login",
-        "description": "Open the link below, sign in to your Xiaomi account in the browser and confirm (any verification happens inside that page):\n\n[Sign in to Xiaomi account]({login_url})\n\nThis page continues automatically after you confirm; if it does not, press Submit to check.\n\nYou can also scan this QR code with your phone (optional):\n\n![QR](data:image/png;base64,{qr_image})\n\nThe link is valid for about {timeout} seconds and refreshes automatically when expired.{status}"
+        "description": "Open the link below, sign in to your Xiaomi account in the browser and confirm (any verification happens inside that page):\n\n[Sign in to Xiaomi account]({login_url})\n\nAfter confirming, come back here and press Submit — the integration finishes automatically.\n\nYou can also scan this QR code with your phone (optional):\n\n![QR](data:image/png;base64,{qr_image})\n\nThe link is valid for about {timeout} seconds and refreshes automatically when expired.{status}"
+      },
+      "wait_login": {
+        "title": "Waiting for login",
+        "description": "Waiting for you to finish the login in the browser…\n\nThis page continues automatically once confirmed. Haven't opened it yet? Click: [Sign in to Xiaomi account]({login_url})"
       }
     },
     "error": {
       "link_start_failed": "Could not obtain a login link. Press Submit to retry.",
-      "login_not_detected": "Login not detected yet. Finish the login in the browser, then press Submit.",
-      "login_expired": "Login link expired. A new link has been generated, please log in again.",
       "cannot_connect": "Cannot connect to the Mi Fitness API. Check region and internet.",
       "unknown": "Unexpected error — check Home Assistant logs."
     },
     "abort": {
       "already_configured": "This Xiaomi account is already configured.",
-      "reauth_successful": "Re-authentication successful."
+      "reauth_successful": "Re-authentication successful, credentials refreshed."
     }
   }
 }

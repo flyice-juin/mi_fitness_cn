@@ -9,19 +9,21 @@
       },
       "browser_login": {
         "title": "小米运动健康 — 浏览器登录",
-        "description": "点击下方链接,在浏览器中登录小米账号并确认(如触发验证,直接在页面上完成即可):\n\n[点此登录小米账号]({login_url})\n\n登录确认后本页面会自动继续;若长时间未继续,点「提交」手动检查。\n\n也可以用手机扫这个二维码(可选):\n\n![二维码](data:image/png;base64,{qr_image})\n\n链接有效期约 {timeout} 秒,过期会自动生成新链接。{status}"
+        "description": "点击下方链接,在浏览器中登录小米账号并确认(如触发验证,直接在页面上完成即可):\n\n[点此登录小米账号]({login_url})\n\n登录确认后,回到本页点「提交」,集成会自动完成剩余步骤。\n\n也可以用手机扫这个二维码(可选):\n\n![二维码](data:image/png;base64,{qr_image})\n\n链接有效期约 {timeout} 秒,过期会自动生成新链接。{status}"
+      },
+      "wait_login": {
+        "title": "等待登录确认",
+        "description": "正在等待你在浏览器中完成登录…\n\n确认后这里会自动继续。若还未打开登录页,点此:[登录小米账号]({login_url})"
       }
     },
     "error": {
       "link_start_failed": "获取登录链接失败,点「提交」重试。",
-      "login_not_detected": "尚未检测到登录确认。请在浏览器完成登录后,再点「提交」。",
-      "login_expired": "登录链接已过期,已生成新链接,请重新完成登录。",
       "cannot_connect": "无法连接小米运动健康 API,请检查区域设置和网络。",
       "unknown": "未知错误——请查看 Home Assistant 日志。"
     },
     "abort": {
       "already_configured": "该小米账号已配置过。",
-      "reauth_successful": "重新认证成功。"
+      "reauth_successful": "重新认证成功,凭证已刷新。"
     }
   }
 }

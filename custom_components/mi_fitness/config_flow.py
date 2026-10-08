@@ -73,8 +73,7 @@ class MiFitnessConfigFlow(ConfigFlow, domain=DOMAIN):
         except Exception as exc:  # noqa: BLE001 — 轮询失败统一呈现给用户
             self._qr_error = exc
             _LOGGER.warning("浏览器登录轮询失败: %s", exc)
-            return
-        # 自动推进当前步骤(用户无需手动点提交)
+        # 无论成功失败都自动推进:成功 → 落库;失败 → 换新链接重新展示
         try:
             self.hass.async_create_task(
                 self.hass.config_entries.flow.async_configure(self.flow_id)
@@ -96,7 +95,19 @@ class MiFitnessConfigFlow(ConfigFlow, domain=DOMAIN):
 
         # 登录已完成(自动推进或手动检查)→ 落库
         if self._qr_result is not None:
-            return self._finish_login(self._qr_result)
+            return await self._finish_login(self._qr_result)
+
+        # 轮询失败(链接过期等)自动推进到这里 → 重置并生成新链接
+        if (
+            user_input is None
+            and self._qr_error is not None
+            and self._qr_task is not None
+            and self._qr_task.done()
+        ):
+            note = str(self._qr_error)
+            self._reset_login()
+            self._status_note = f"{note};已生成新的登录链接,请重新完成登录"
+            return await self.async_step_browser_login()
 
         # 首次进入:申请登录链接 + 启动后台轮询
         if self._login_session is None:
@@ -113,12 +124,15 @@ class MiFitnessConfigFlow(ConfigFlow, domain=DOMAIN):
             self._qr_task = self.hass.async_create_task(self._qr_poll_loop())
 
         # 用户手动点了「提交」(检查登录状态)
-        if user_input is not None and self._qr_task is not None and self._qr_task.done():
-            if self._qr_error is not None:
-                note = str(self._qr_error)
-                self._reset_login()
-                self._status_note = f"{note};已生成新的登录链接,请重新完成登录"
-                return await self.async_step_browser_login()
+        if user_input is not None and self._qr_task is not None:
+            if self._qr_task.done():
+                if self._qr_error is not None:
+                    note = str(self._qr_error)
+                    self._reset_login()
+                    self._status_note = f"{note};已生成新的登录链接,请重新完成登录"
+                    return await self.async_step_browser_login()
+            else:
+                errors["base"] = "login_not_detected"
 
         return self._show_browser_form(errors=errors)
 
@@ -136,7 +150,7 @@ class MiFitnessConfigFlow(ConfigFlow, domain=DOMAIN):
             },
         )
 
-    def _finish_login(self, result) -> ConfigFlowResult:
+    async def _finish_login(self, result) -> ConfigFlowResult:
         entry_data = {
             "auth_method":  "browser",
             CONF_USER_ID:       result.user_id,
@@ -148,6 +162,7 @@ class MiFitnessConfigFlow(ConfigFlow, domain=DOMAIN):
         if result.pass_token:
             entry_data[CONF_PASS_TOKEN] = result.pass_token
 
+        # 重新认证:直接刷新原条目
         if self._reauth_entry is not None:
             entry = self._reauth_entry
             self.hass.config_entries.async_update_entry(entry, data=entry_data)
@@ -156,11 +171,17 @@ class MiFitnessConfigFlow(ConfigFlow, domain=DOMAIN):
             )
             return self.async_abort(reason="reauth_successful")
 
-        return self.hass.async_create_task(self._async_finish_create(entry_data, result))
-
-    async def _async_finish_create(self, entry_data: dict, result) -> ConfigFlowResult:
+        # 同账号已配置 → 刷新其凭证并重载(重新登录即换新凭证,无需删除重加)
         await self.async_set_unique_id(result.user_id)
+        for entry in self._async_current_entries():
+            if entry.unique_id == result.user_id:
+                self.hass.config_entries.async_update_entry(entry, data=entry_data)
+                self.hass.async_create_task(
+                    self.hass.config_entries.async_reload(entry.entry_id)
+                )
+                return self.async_abort(reason="reauth_successful")
         self._abort_if_unique_id_configured()
+
         return self.async_create_entry(
             title=f"小米运动健康 ({result.user_id})",
             data=entry_data,

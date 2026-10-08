@@ -7,23 +7,16 @@
           "region": "Server region"
         }
       },
-      "browser_login": {
-        "title": "小米运动健康 — Browser Login",
-        "description": "Open the link below, sign in to your Xiaomi account in the browser and confirm (any verification happens inside that page):\n\n[Sign in to Xiaomi account]({login_url})\n\nAfter confirming, come back here and press Submit — the integration finishes automatically.\n\nYou can also scan this QR code with your phone (optional):\n\n![QR](data:image/png;base64,{qr_image})\n\nThe link is valid for about {timeout} seconds and refreshes automatically when expired.{status}"
-      },
       "wait_login": {
-        "title": "Waiting for login",
-        "description": "Waiting for you to finish the login in the browser…\n\nThis page continues automatically once confirmed. Haven't opened it yet? Click: [Sign in to Xiaomi account]({login_url})"
+        "title": "Browser Login — Waiting for confirmation",
+        "description": "Open the link below, sign in to your Xiaomi account and confirm (any verification happens inside that page):\n\n[Sign in to Xiaomi account]({login_url})\n\nThis page finishes automatically after you confirm — no other action needed.\n\nOr scan this QR code with your phone (optional):\n\n![QR](data:image/png;base64,{qr_image})\n\nThe link is valid for about {timeout} seconds and refreshes automatically when expired.{status}"
       }
     },
-    "error": {
-      "link_start_failed": "Could not obtain a login link. Press Submit to retry.",
-      "cannot_connect": "Cannot connect to the Mi Fitness API. Check region and internet.",
-      "unknown": "Unexpected error — check Home Assistant logs."
-    },
+    "error": {},
     "abort": {
       "already_configured": "This Xiaomi account is already configured.",
-      "reauth_successful": "Re-authentication successful, credentials refreshed."
+      "reauth_successful": "Re-authentication successful, credentials refreshed.",
+      "link_start_failed": "Could not obtain a login link. Please try adding again later."
     }
   }
 }

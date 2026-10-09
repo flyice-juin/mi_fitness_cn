@@ -163,10 +163,11 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
         icon="mdi:run",
     ),
     MiFitnessSensorDescription(
-        key="suggested_activity",
-        name="建议活动",
-        data_key="suggested_activity",
-        icon="mdi:lightbulb-on",
+        key="training_load_today",
+        name="今日训练负荷",
+        data_key="training_load_today",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:chart-bell-curve-cumulative",
     ),
     MiFitnessSensorDescription(
         key="stand_hours_today",
@@ -177,28 +178,10 @@ SENSOR_TYPES: tuple[MiFitnessSensorDescription, ...] = (
         icon="mdi:sofa",
     ),
     MiFitnessSensorDescription(
-        key="vitality_high",
-        name="高强度活力",
-        data_key="vitality_high",
-        native_unit_of_measurement="min",
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:lightning-bolt",
-    ),
-    MiFitnessSensorDescription(
-        key="vitality_medium",
-        name="中强度活力",
-        data_key="vitality_medium",
-        native_unit_of_measurement="min",
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:run",
-    ),
-    MiFitnessSensorDescription(
-        key="vitality_low",
-        name="低强度活力",
-        data_key="vitality_low",
-        native_unit_of_measurement="min",
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:walk",
+        key="workout_latest",
+        name="最新运动",
+        data_key="workout_latest_type",
+        icon="mdi:run-fast",
     ),
     MiFitnessSensorDescription(
         key="sleep_quality",
@@ -392,11 +375,37 @@ class MiFitnessSensor(CoordinatorEntity[MiFitnessCoordinator], SensorEntity):
             if hours_list:
                 attrs["hours_list"] = hours_list
 
-        elif key == "suggested_activity":
-            attrs["activity_type"] = data.get("suggested_activity_type")
-            dur = data.get("suggested_activity_duration")
-            if dur is not None:
-                attrs["suggested_minutes"] = dur
+        elif key == "workout_latest":
+            # 单实体承载全部运动明细:state=最新运动类型,其余字段全挂属性,
+            # 供 FreeUI 手环卡等上层直接消费,避免铺一堆实体
+            start = data.get("workout_latest_start")
+            if start:
+                attrs["start"] = datetime.fromtimestamp(start).isoformat()
+            end = data.get("workout_latest_end")
+            if end:
+                attrs["end"] = datetime.fromtimestamp(end).isoformat()
+            attrs["type_code"]   = data.get("workout_latest_type_code")
+            attrs["duration_min"] = data.get("workout_latest_duration")
+            attrs["distance_m"]  = data.get("workout_latest_distance")
+            attrs["distance_km"] = round(
+                (data.get("workout_latest_distance") or 0) / 1000, 2
+            )
+            attrs["calories"]    = data.get("workout_latest_calories")
+            attrs["avg_hr"]      = data.get("workout_latest_avg_hr")
+            attrs["max_hr"]      = data.get("workout_latest_max_hr")
+            attrs["avg_speed_kmh"] = data.get("workout_latest_avg_speed")
+            attrs["today_count"] = data.get("workout_count_today")
+            attrs["today_list"]  = data.get("workout_today_list")
+            attrs["history_30d"] = data.get("workout_history_30d")
+
+        elif key == "training_load_today":
+            if data.get("training_load_level") is not None:
+                attrs["level"] = data["training_load_level"]
+            if data.get("training_load_wtl_sum") is not None:
+                attrs["wtl_sum"] = data["training_load_wtl_sum"]
+            ts = data.get("training_load_ts")
+            if ts:
+                attrs["last_updated"] = datetime.fromtimestamp(ts).isoformat()
 
         elif key == "weight":
             ts = data.get("weight_ts")

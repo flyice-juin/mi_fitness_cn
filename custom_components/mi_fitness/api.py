@@ -118,6 +118,31 @@ def _build_get_params(url: str, data_obj: dict, ssecurity: str) -> tuple[dict, s
     return params, snonce
 
 
+def _build_post_form(path: str, data_obj: dict, ssecurity: str) -> tuple[dict, str]:
+    """Build signed POST form body (x-www-form-urlencoded).
+
+    Same RC4+SHA1 family as GET; the sport-records endpoint only accepts POST.
+    Returns (form_dict, signed_nonce).
+    """
+    nonce  = _gen_nonce()
+    snonce = _signed_nonce(ssecurity, nonce)
+    data_str = json.dumps(data_obj, separators=(",", ":"))
+
+    plain    = {"data": data_str}
+    rc4_hash = _fc4_sign("POST", path, plain, snonce)
+
+    enc_data     = _encrypt_rc4(snonce, data_str)
+    enc_rc4_hash = _encrypt_rc4(snonce, rc4_hash)
+
+    form = {
+        "data":       enc_data,
+        "rc4_hash__": enc_rc4_hash,
+        "signature":  _fc4_sign("POST", path, {"data": enc_data, "rc4_hash__": enc_rc4_hash}, snonce),
+        "_nonce":     nonce,
+    }
+    return form, snonce
+
+
 # ── Client ───────────────────────────────────────────────────────────────────
 
 class MiFitnessClient:
@@ -235,8 +260,67 @@ class MiFitnessClient:
         try:
             plaintext = _decrypt_rc4(snonce, r.text.strip())
             return json.loads(plaintext)
-        except Exception as exc:
-            raise MiFitnessApiError(f"Decrypt/parse failed: {exc} raw={r.text[:100]}") from exc
+        except MiFitnessAuthError:
+            raise
+        except Exception:
+            # 个别端点(如 project-data 系列)明文返回 JSON 而非 RC4 密文,
+            # 解密失败时先尝试按明文解析,再判定失败。
+            text = r.text.strip()
+            if text.startswith("&&&START&&&"):
+                text = text[len("&&&START&&&"):]
+            try:
+                return json.loads(text)
+            except Exception as exc:
+                raise MiFitnessApiError(
+                    f"Decrypt/parse failed: {exc} raw={r.text[:100]}"
+                ) from exc
+
+    def _post(self, path: str, data_obj: dict) -> dict:
+        """Signed POST (form body), decrypt RC4 response, return parsed JSON.
+
+        Some endpoints (sport records) reject the GET form; the POST body
+        carries the same data/rc4_hash__/signature/_nonce bundle urlencoded.
+        """
+        if self._base is None:
+            # Resolve the working host with a known-good GET probe first.
+            self._base = self._resolve_base(
+                "/app/v1/data/get_fitness_data_by_watermark",
+                {"userid": self.user_id, "limit": 1, "watermark": 0},
+            )
+        url = f"{self._base}{path}"
+        form, snonce = _build_post_form(path, data_obj, self.ssecurity)
+        try:
+            r = self._session.post(
+                url,
+                data=form,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=20,
+            )
+        except requests.RequestException as exc:
+            raise MiFitnessApiError(f"Network error: {exc}") from exc
+
+        if r.status_code == 401:
+            _LOGGER.error("HTTP 401 body=%s  url=%s", r.text[:300], r.url)
+            raise MiFitnessAuthError("serviceToken expired (HTTP 401)")
+        if r.status_code != 200:
+            raise MiFitnessApiError(f"HTTP {r.status_code}: {r.text[:200]}")
+
+        try:
+            plaintext = _decrypt_rc4(snonce, r.text.strip())
+            return json.loads(plaintext)
+        except MiFitnessAuthError:
+            raise
+        except Exception:
+            # 个别端点明文返回 JSON 而非 RC4 密文,解密失败时按明文再试一次。
+            text = r.text.strip()
+            if text.startswith("&&&START&&&"):
+                text = text[len("&&&START&&&"):]
+            try:
+                return json.loads(text)
+            except Exception as exc:
+                raise MiFitnessApiError(
+                    f"Decrypt/parse failed: {exc} raw={r.text[:100]}"
+                ) from exc
 
     # ── Public methods ───────────────────────────────────────────────────────
 
@@ -308,6 +392,38 @@ class MiFitnessClient:
             if not dl or not r.get("has_more") or new_wm == wm:
                 break
             wm = new_wm
+            time.sleep(0.2)
+        return items
+
+    def get_sport_records(self, start_ts: int, end_ts: int, max_pages: int = 20) -> list[dict]:
+        """
+        按时间窗拉取运动记录(秒级时间戳),next_key 分页。
+
+        端点 POST /app/v1/data/get_sport_records_by_time(出处:
+        HUAYUE1024/mi-fitness-mcp-cn 云适配器,已实测 CN 账号可用)。
+        返回原始条目列表,每条信封 {key, category, time, zone_offset,
+        update_time, watermark, value:"<JSON 字符串>"},value 内含
+        start_time/end_time/duration(秒)/distance(米)/calories/avg_hrm/
+        max_hrm/avg_speed(km/h)/sport_type 等字段,解析由调用方容错处理。
+        """
+        items: list[dict] = []
+        next_key = None
+        for _ in range(max_pages):
+            payload = {"start_time": int(start_ts), "end_time": int(end_ts), "limit": 50}
+            if next_key:
+                payload["next_key"] = next_key
+            result = self._post("/app/v1/data/get_sport_records_by_time", payload)
+            code = result.get("code", -1)
+            if code != 0:
+                raise MiFitnessApiError(
+                    f"sport_records error code {code}: "
+                    f"{str(result.get('message') or result.get('desc') or '')[:120]}"
+                )
+            r = result.get("result") or {}
+            items.extend(r.get("sport_records") or [])
+            if not r.get("has_more") or not r.get("next_key"):
+                break
+            next_key = r.get("next_key")
             time.sleep(0.2)
         return items
 

@@ -36,6 +36,7 @@ KEY_VITALITY           = "vitality"
 KEY_INTENSITY          = "intensity"
 KEY_VALID_STAND        = "valid_stand"
 KEY_SPO2               = "spo2"
+KEY_TRAINING_LOAD      = "training_load"
 
 # Device info
 DEVICE_MANUFACTURER = "Xiaomi"

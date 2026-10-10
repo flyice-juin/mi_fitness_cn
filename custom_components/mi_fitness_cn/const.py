@@ -1,6 +1,11 @@
-"""Constants for Mi Fitness integration."""
+"""Constants for Mi Fitness CN integration (小米运动健康 CN 分支)。
 
-DOMAIN = "mi_fitness"
+CN 分支独立域名说明:上游 batareya16/MiFitnessHass 已占用 mi_fitness 域名,
+本分支作为独立 HACS 项目发布,域名/目录/存储键一律 mi_fitness_cn,两者不可
+混装(HA 按 domain 识别集成,同名会互相覆盖)。
+"""
+
+DOMAIN = "mi_fitness_cn"
 
 CONF_USER_ID       = "user_id"
 CONF_C_USER_ID     = "c_user_id"
@@ -22,7 +27,7 @@ SCAN_INTERVAL_MINUTES = 15
 # Update this value with each major release.
 DEFAULT_START_WATERMARK = 157_500_000_000_000
 
-STORAGE_KEY = "mi_fitness_watermarks"
+STORAGE_KEY = "mi_fitness_cn_watermarks"
 STORAGE_VERSION = 1
 
 # Sensor keys in the API response

@@ -255,6 +255,12 @@ def _stages_to_list(items: list[dict]) -> list[dict]:
     return out
 
 
+# 睡眠分段间隙阈值:同一条记录里前后分段断开超过 6 小时,视为小米把「下一场
+# 睡眠的开头」续发进了本会话(见 _split_stray_sleep_tails)。夜醒/失眠中断远
+# 低于此值,不会误切;真正的午睡小米本来就独立成会话,也不受影响。
+SLEEP_SESSION_GAP_SEC = 6 * 3600
+
+
 class MiFitnessCoordinator(DataUpdateCoordinator):
     """Polls Mi Fitness API and aggregates sensor data."""
 
@@ -329,6 +335,11 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
                 int(k): v for k, v in (stored.get("workouts") or {}).items()
             }
             self._exercise_backfill_done = stored.get("exercise_backfill_done", False)
+            # 存储里的睡眠记录可能带着「续发尾巴」污染(小米把新一场入睡的开头
+            # 挂在上一场会话上重发,见 _split_stray_sleep_tails),加载后立即切一次
+            # 并重建视图,不等第一轮轮询
+            self._split_stray_sleep_tails()
+            self._rebuild_sleep_views()
             # 重启后从 0 全量重走当前数据窗口(通常只有几页):原始流是短窗口
             # 馈送,带分段 timeline 的 sleep 项错过水位就永久丢失;全量重走
             # 让分段等短窗口数据自愈。幂等性:步数按 ts 去重替换、心率按 ts
@@ -1213,10 +1224,78 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
                     rec[k] = prev[k]
         self._sleep_records[bedtime] = rec
 
+    def _split_stray_sleep_tails(self) -> None:
+        """切掉续发进旧会话的「下一场睡眠开头」分段(只丢不加,见下)。
+
+        小米会把新一场入睡的开头浅睡段挂在上一场会话的 bedtime 上续发。实测
+        2026-10-10:前晚(10-08 22:19 睡)的记录被续上 10-09 22:13-22:50 的浅睡段,
+        wakeup 被撑到 22:50 —— 醒来日归属随之把这段浅睡塞进了「昨天」的表;
+        而真正的整夜会话随后以新 bedtime(10-09 22:13,首段即深睡)到达,于是
+        「今天」看起来从第一个深睡开始算。两条记录还在同一时刻(22:13-22:50)
+        各持一份互相矛盾的抄本。
+
+        处理:记录分段里出现超过 SLEEP_SESSION_GAP_SEC 的断隙即视为会话边界,
+        末段尾巴切掉。尾巴若与更晚的会话时间窗重叠(同一晚主会话随后到达,
+        同一时刻两份抄本)必然是冗余抄本,丢弃 —— 主会话自己的分段才是权威
+        版本;刻意不把尾巴「自立门户」成新会话:它通常会毒化后续按 bedtime
+        合并的日汇总回填(covered_end 被尾巴顶高,整夜分段被拒之门外)。
+        每轮视图重建前跑一遍,重启全量重放时同样自愈。
+
+        已知取舍:若小米确实把一场真实睡眠(比如傍晚打盹)续进了旧会话,这里
+        会把它连同小米 App 里它占的时长一起丢掉 —— 比起整夜分段被尾巴挤掉,
+        丢一段孤证更安全。
+        """
+        for store in (self._sleep_records, self._sleep_stages):
+            for bt in sorted(list(store.keys())):
+                stages = store[bt] if store is self._sleep_stages else (store[bt].get("stages") or [])
+                if len(stages) < 2:
+                    continue
+                cut = max(
+                    (i for i in range(1, len(stages)) if stages[i]["start"] - stages[i - 1]["end"] > SLEEP_SESSION_GAP_SEC),
+                    default=None,
+                )
+                if cut is None:
+                    continue
+                main, tail = stages[:cut], stages[cut:]
+                t0, t1 = tail[0]["start"], tail[-1]["end"]
+                overlap = False
+                for ob, orec in self._sleep_records.items():
+                    if ob == bt or not orec.get("stages"):
+                        continue
+                    ow = orec.get("wakeup") or max(s["end"] for s in orec["stages"])
+                    if ob < t1 and t0 < ow:
+                        overlap = True
+                        break
+                if overlap:
+                    _LOGGER.info(
+                        "Mi Fitness: 丢弃续发进会话(%s)的异席分段尾巴 %s-%s(与更晚会话重叠)",
+                        datetime.fromtimestamp(bt).strftime("%m-%d %H:%M"),
+                        datetime.fromtimestamp(t0).strftime("%m-%d %H:%M"),
+                        datetime.fromtimestamp(t1).strftime("%m-%d %H:%M"),
+                    )
+                else:
+                    _LOGGER.info(
+                        "Mi Fitness: 会话(%s)尾巴 %s-%s 与任何会话都不重叠,按孤儿分段丢弃"
+                        "(主会话若随后到达会以自己的分段为准)",
+                        datetime.fromtimestamp(bt).strftime("%m-%d %H:%M"),
+                        datetime.fromtimestamp(t0).strftime("%m-%d %H:%M"),
+                        datetime.fromtimestamp(t1).strftime("%m-%d %H:%M"),
+                    )
+                if store is self._sleep_stages:
+                    store[bt] = main
+                else:
+                    rec = store[bt]
+                    rec["stages"] = main
+                    # wakeup 收回到主段末尾(它被尾巴撑远了);duration/深浅总分钟
+                    # 是小米自报口径,不动
+                    if main:
+                        rec["wakeup"] = main[-1]["end"]
+
     def _rebuild_sleep_views(self) -> None:
         """按「醒来日期」把全天多段聚合成视图:
         昨晚(10/7 睡→10/8 醒)与午睡(10/8)都归入 10/8 —— 小米 App 全天睡眠同构。
         最新醒来日的合计写入传感器;_sleep_history 按醒来日供 UI 逐夜翻页。"""
+        self._split_stray_sleep_tails()
         groups: dict[str, list[dict]] = {}
         for rec in self._sleep_records.values():
             if not rec.get("wakeup"):

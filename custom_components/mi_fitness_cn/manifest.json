@@ -1,0 +1,17 @@
+{
+  "domain": "mi_fitness_cn",
+  "name": "小米运动健康 CN",
+  "codeowners": [
+    "@flyice-juin"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/flyice-juin/mi_fitness_cn",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/flyice-juin/mi_fitness_cn/issues",
+  "requirements": [
+    "pycryptodome>=3.15.0",
+    "requests>=2.28.0"
+  ],
+  "version": "1.2.0-cn.4"
+}

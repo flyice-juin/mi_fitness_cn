@@ -1,9 +1,20 @@
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
+
+# IDE / OS
 .DS_Store
 .idea/
 .vscode/
-token.json  
-__pycache__/  
-*.pyc  
+
+# 凭据(调试遗留)
+token.json
+
+# 仓库只收纯集成文件(custom_components/ + README/hacs.json/LICENSE/.github):
+# 本地运维脚本、测试沙箱、服务器快照、截图一律不入库
+/scripts/
+/tools/
+/_server_snapshot/
+/test_*.py
+/mi_fitness_screenshot.png

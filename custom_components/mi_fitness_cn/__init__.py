@@ -1,17 +1,13 @@
-"""Mi Fitness Home Assistant integration."""
+"""Mi Fitness CN(小米运动健康 CN)Home Assistant integration."""
 
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
-from homeassistant.components.frontend import add_extra_js_url
-from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
-from homeassistant.loader import async_get_integration
 
 from .api import MiFitnessApiError, MiFitnessClient
 from .const import (
@@ -30,43 +26,9 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [Platform.SENSOR]
 
-# Lovelace cards bundled with the integration. Auto-registered as frontend
-# resources so users don't have to add them manually.
-_CARDS = (
-    "mi-fitness-activity-card.js",
-    "mi-fitness-activity-streak-card.js",
-    "mi-fitness-sleep-card.js",
-    "mi-fitness-sleep-streak-card.js",
-)
-_CARDS_URL_BASE = f"/{DOMAIN}/cards"
-
-
-async def _async_register_cards(hass: HomeAssistant) -> None:
-    """Serve and auto-load the bundled Lovelace cards (once per HA run)."""
-    flag = f"{DOMAIN}_cards_registered"
-    if hass.data.get(flag):
-        return
-
-    # Version query string busts the browser cache on every release —
-    # without it, updated card code is never picked up.
-    integration = await async_get_integration(hass, DOMAIN)
-    ver = str(integration.version or "0")
-
-    www_dir = Path(__file__).parent / "www"
-    await hass.http.async_register_static_paths(
-        [StaticPathConfig(_CARDS_URL_BASE, str(www_dir), False)]
-    )
-    for card in _CARDS:
-        add_extra_js_url(hass, f"{_CARDS_URL_BASE}/{card}?v={ver}")
-
-    hass.data[flag] = True
-    _LOGGER.debug("Mi Fitness: registered %d Lovelace cards (v%s)", len(_CARDS), ver)
-
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Mi Fitness from a config entry."""
-    await _async_register_cards(hass)
-
+    """Set up Mi Fitness CN from a config entry."""
     data = entry.data
 
     client = MiFitnessClient(

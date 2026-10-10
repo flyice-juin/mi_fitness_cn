@@ -1,4 +1,4 @@
-# 小米运动健康 — Home Assistant 集成(国内适配版)
+# 小米运动健康 CN — Home Assistant 集成(国内适配版)
 
 非官方 Home Assistant 集成,从小米**运动健康**(Mi Fitness / 小米运动健康)云同步
 个人健康数据:步数、距离、卡路里、心率(当前/平均/静息)、睡眠(时长/深浅/REM/评分/
@@ -6,6 +6,10 @@
 
 > 基于上游 [batareya16/MiFitnessHass](https://github.com/batareya16/MiFitnessHass)(MIT)
 > 深度国内适配:登录方式、数据接口、界面全面针对国内账号重做。
+>
+> **CN 独立分支**:上游已占用 `mi_fitness` 域名且上架 HACS,本分支以
+> `mi_fitness_cn` 为集成域名独立发布 —— 两者不可同装(HA 按 domain 识别集成,
+> 同名会互相覆盖),从上游换到本分支请先删除旧条目再重新配置。
 
 ## 登录方式:浏览器链接登录(唯一方式)
 
@@ -25,12 +29,12 @@
 
 ### HACS(推荐)
 
-HACS → 自定义仓库 → 添加本仓库地址(类别:Integration)→ 安装「小米运动健康」
-→ 重启 HA → 设置 → 设备与服务 → 添加集成 → 搜索「小米运动健康」。
+HACS → 自定义仓库 → 添加本仓库地址(类别:Integration)→ 安装「小米运动健康 CN」
+→ 重启 HA → 设置 → 设备与服务 → 添加集成 → 搜索「小米运动健康 CN」。
 
 ### 手动
 
-把 `custom_components/mi_fitness/` 整个目录复制到 HA 配置目录的
+把 `custom_components/mi_fitness_cn/` 整个目录复制到 HA 配置目录的
 `custom_components/` 下,重启 HA。
 
 ## 配置

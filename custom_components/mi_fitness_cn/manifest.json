@@ -13,5 +13,5 @@
     "pycryptodome>=3.15.0",
     "requests>=2.28.0"
   ],
-  "version": "1.2.0-cn.4"
+  "version": "1.2.0-cn.6"
 }

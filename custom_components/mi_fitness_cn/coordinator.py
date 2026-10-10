@@ -1291,6 +1291,47 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
                     if main:
                         rec["wakeup"] = main[-1]["end"]
 
+    def _normalize_sleep_summary(self, rec: dict) -> None:
+        """把一条睡眠记录规整成「真睡着」口径,并把深/浅/REM 收进时长内(只缩不涨)。
+
+        时长口径:有分段时改用分段里扣掉「醒」态的真睡着分钟 —— 这就是小米
+        App 头条的口径(实测 2026-10-10:App 10h30m = 夜里 452-夜醒35 + 午睡
+        213,分毫不差;在床口径会多出夜醒的部分);无分段(整段浅睡兜底的小睡)
+        退回自报 duration,但仍按时间窗收口。
+
+        收口背景:自报值会污染且被焊死 —— 实测 2026-10-10 夜里 22:13-05:45
+        的会话(窗口 452 分钟)自报 duration=630:早晨赖床时段把会话撑大后,
+        纠正值又被入库「取更长 duration」的规则挡回;浅睡 487=630-143 是按
+        撑大时长凑的余数,跟着虚高,当日合计一度冲到 14 小时。睡眠不可能
+        超过躺在床上的时间窗。深/浅/REM 不得大于时长:深睡超了截深睡,差额
+        再从浅睡(小米的凑余数桶)里扣。只在高估时收缩,干净记录分毫不动;
+        读路径每次规整,在库脏值无需迁移。
+        """
+        bedtime = rec.get("bedtime") or 0
+        wakeup = rec.get("wakeup") or 0
+        stages = rec.get("stages") or []
+        window_min = 0.0
+        if wakeup > bedtime:
+            window_min = (wakeup - bedtime) / 60
+        elif stages:
+            window_min = (stages[-1]["end"] - stages[0]["start"]) / 60
+        duration = rec.get("duration", 0)
+        if stages:
+            duration = int(
+                sum((x["end"] - x["start"]) / 60 for x in stages if x["state"] != 5)
+            )
+        if window_min > 0 and 0 < duration > window_min:
+            duration = int(window_min)
+        rec["duration"] = duration
+        if duration > 0:
+            if rec.get("deep", 0) > duration:
+                rec["deep"] = duration
+            staged_total = rec.get("deep", 0) + rec.get("light", 0) + rec.get("rem", 0)
+            if staged_total > duration:
+                rec["light"] = max(
+                    0, duration - rec.get("deep", 0) - rec.get("rem", 0)
+                )
+
     def _rebuild_sleep_views(self) -> None:
         """按「醒来日期」把全天多段聚合成视图:
         昨晚(10/7 睡→10/8 醒)与午睡(10/8)都归入 10/8 —— 小米 App 全天睡眠同构。
@@ -1300,6 +1341,9 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
         for rec in self._sleep_records.values():
             if not rec.get("wakeup"):
                 continue
+            # 自报值先规整成真睡着口径再合计,防虚高值混进当天总计
+            # (见 _normalize_sleep_summary)
+            self._normalize_sleep_summary(rec)
             wd = datetime.fromtimestamp(rec["wakeup"]).strftime("%Y-%m-%d")
             groups.setdefault(wd, []).append(rec)
 
@@ -1316,7 +1360,20 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
             wakeup = segs[-1]["wakeup"]
             stages = [seg for x in segs for seg in (x.get("stages") or [])]
             stages.sort(key=lambda x: x["start"])
-            time_in_bed = (wakeup - bedtime) / 60 if wakeup > bedtime else duration
+            # 在床时间按各会话自身窗口求和:跨会话的清醒间隙(如午睡前的半天)
+            # 不算在床,否则效率被间隙稀释(此前 10-09 出过 105% 的反向荒谬值)
+            time_in_bed = sum(
+                (x["wakeup"] - x["bedtime"]) / 60 for x in segs if x["wakeup"] > x["bedtime"]
+            )
+            # 真睡着分钟数:分段里扣掉「醒」态。有效率用它当分子, duration
+            # (含夜间清醒的口径)当分子会恒 100%
+            asleep_min = sum(
+                (x["end"] - x["start"]) / 60 for x in stages if x["state"] != 5
+            )
+            eff_denominator = time_in_bed if time_in_bed > 0 else duration
+            efficiency = (
+                round(asleep_min / eff_denominator * 100) if eff_denominator > 0 else 0
+            )
             hr = {
                 "avg_hr": next((x["avg_hr"] for x in segs if x.get("avg_hr")), 0),
                 "max_hr": max((x["max_hr"] for x in segs if x.get("max_hr")), default=0),
@@ -1332,7 +1389,7 @@ class MiFitnessCoordinator(DataUpdateCoordinator):
                 "rem": rem,
                 "awake_count": awake,
                 "quality": score or _sleep_quality_score(duration, deep, rem, awake),
-                "efficiency": round(duration / time_in_bed * 100) if time_in_bed > 0 else 0,
+                "efficiency": efficiency,
                 **hr,
             }
             if stages:
